@@ -1,0 +1,1411 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Set-up
+```{r}
+library(tidyverse)
+library(lubridate)
+library(janitor)
+library(brms)
+options(mc.cores = 8, brms.backend = "cmdstanr") # allows threading
+library(tidybayes)
+library(bayesplot)
+library(tryCatchLog)
+```
+
+
+### Paths
+```{r}
+data_path <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/raw/'
+save_path <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/rds_rda/risk_factor_analysis/'
+amr_data_path <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/rds_rda/modelling_uncertainty/data_with_locations/'
+data_path_hannah <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/hannah_analysis/'
+sharepoint_data_path <- '/Users/lv13916/Library/CloudStorage/OneDrive-SharedLibraries-UniversityofBristol/AMR Database - Documents/OH-STAR archive/'
+
+ceph_data_rf_analysis <- readRDS(paste0(save_path, 'ceph_data_rf_analysis.Rds')) %>%
+  distinct()
+
+```
+
+### Adding rainfall
+```{r}
+ceph_data_rf_analysis <- readRDS(paste0(save_path, 'ceph_data_rf_analysis.Rds')) %>%
+  select(-season)
+
+#add rainfall data
+rainfall_data <- read.csv(paste0(save_path, 'monthly_rainfall.csv')) %>%
+  gather(key = 'month_name', value = 'rainfall', -year)
+
+rainfall_data_joined <- ceph_data_rf_analysis %>%
+  select(date, assay) %>%
+  mutate(month_name = tolower(month(date, label = T, abbr = T)),
+         year = year(date)) %>%
+  left_join(rainfall_data, by = c('month_name', 'year')) %>%
+  select(assay, rainfall)
+
+ceph_data_rf_analysis_edit <- ceph_data_rf_analysis %>%
+  left_join(rainfall_data_joined, by = 'assay')
+
+saveRDS(ceph_data_rf_analysis_edit, paste0(save_path, 'ceph_data_rf_analysis.Rds'))
+
+
+
+ceph_data_rf_analysis
+```
+
+
+### Functions
+### Make horseshoe formula with all risk factors
+```{r}
+rf_list <- names(ceph_data_rf_analysis)[8:72]
+rf_list
+
+count = 0
+rf_formula <- ''
+for (i in rf_list){
+  if (count == 0){
+    rf_formula <- paste(i)
+  }
+  if (count != 0) {
+    rf_formula <- paste(rf_formula, '+', i)
+  }
+  count = count + 1
+}
+
+rf_formula
+```
+
+### possion
+```{r}
+make_possion_formula_horseshoe <- function(rf_formula){
+  
+  model_formula <- bf(count ~ main + am * log_inv_logit(riskfactors + re),nl=TRUE)
+  model_formula <- model_formula + lf(main ~ offset(log_dilution) + (1|assay)) 
+  model_formula <- model_formula + lf('re ~  1 + (1|farm) + (1|assay)')
+  model_formula <- model_formula + lf(paste("riskfactors ~ ", rf_formula))
+  
+  return(model_formula)
+}
+
+make_possion_formula_horseshoe(rf_formula)
+```
+
+
+```{r}
+run_possion_model_horseshoe <- function(data, model_formula, savepath, savename){
+    chain_length <- 4000
+    custom_priors_highvar <- c(
+      set_prior("horseshoe(1)", class= 'b', nlpar = 'riskfactors'), # horseshoe prior
+      set_prior('normal(0, 10)', class = 'b', nlpar = 'main'), # weak info prior
+      set_prior('normal(10, 1)', class = 'sd', nlpar = 're', group = 'assay'), # prevents this wide prior on 'true' random effects which we want with low var
+      set_prior('normal(10, 1)', class = 'sd', nlpar = 'main')# fix variance high using normal dist
+    )
+    
+  start_time <- Sys.time()
+  
+  options(mc.cores = 8, brms.backend = "cmdstanr") # allows threading
+
+  model <- brm(
+    formula = model_formula,
+    data = as.data.frame(data), 
+    family = poisson(), 
+    prior = custom_priors_highvar,
+    iter = chain_length, warmup = chain_length/2, chains = 4, cores = 4,
+    silent = T,
+    backend = "cmdstanr",
+    threads = threading(2) #8 cores used 
+    )
+  
+  end_time <- Sys.time()
+  print(end_time - start_time)
+  
+  saveRDS(model, paste0(savepath, savename))
+  
+  return(model)
+}
+
+```
+
+### schubert
+```{r}
+schubert_format <- function(data, q){
+  
+outcome_only <- data %>%
+    select(assay, count, plate)
+  
+  rf_only <- data %>%
+    select(-count, -plate, -am, -log_dilution)
+  
+  plain_only <- outcome_only %>%
+    filter(plate == 'plain') %>%
+    mutate(fnr=(1-q)^count, 
+               sens = 1-fnr,
+               spec=1) %>%
+    select(-fnr, -plate, -count) 
+  
+  am_only <- outcome_only %>%
+    filter(plate != 'plain') %>%
+    mutate(AMR_binary = ifelse(count == 0, 0, 1)) %>%
+    select(-plate, -count)
+  
+  data_schubert_format <- plain_only %>%
+    left_join(am_only, by = 'assay') %>%
+    left_join(rf_only, by = 'assay')
+
+  return(data_schubert_format)
+}
+
+schubert_format_no_plain <- function(data, q, plain_value){
+  
+outcome_only <- data %>%
+    select(assay, count, plate)
+  
+  rf_only <- data %>%
+    select(-count, -plate, -am, -log_dilution)
+  
+  plain_only <- outcome_only %>%
+    filter(plate == 'plain') %>%
+    mutate(fnr=(1-q)^plain_value, 
+               sens = 1-fnr,
+               spec=1) %>%
+    select(-fnr, -plate, -count) 
+  
+  am_only <- outcome_only %>%
+    filter(plate != 'plain') %>%
+    mutate(AMR_binary = ifelse(count == 0, 0, 1)) %>%
+    select(-plate, -count)
+  
+  data_schubert_format <- plain_only %>%
+    left_join(am_only, by = 'assay') %>%
+    left_join(rf_only, by = 'assay')
+
+  return(data_schubert_format)
+}
+```
+
+
+```{r}
+run_schubert_model <- function(data, rf_formula, savepath, filename){
+
+  
+  priors <- prior(horseshoe(1), class="b", nlpar="riskfactors")
+
+  form <- bf(AMR_binary ~ (sens + spec - 1)/(1+exp(-eta)) + (1-spec),
+          nl=TRUE)
+  form <- form + nlf(eta ~ riskfactors + re)
+  form <- form + lf(re ~ 0 + (1|farm))
+  form <- form + lf(paste("riskfactors ~ ", rf_formula))
+      
+  start_time <- Sys.time()
+
+  schubert_model <- brm(form,
+                        data = data,
+                        prior = priors,
+                        family=bernoulli(link="identity"),
+                        backend = "cmdstanr",
+                        threads = threading(2), #8 cores used
+                        warmup = 2000, iter = 4000, chains = 4, cores=4)
+                        
+
+  saveRDS(schubert_model, paste0(savepath, filename))
+  
+  summary(schubert_model)
+  
+  print(Sys.time() - start_time)
+
+}
+
+
+
+read_in_model <- function(path, filename){
+  model <- readRDS(paste0(path, filename, ".Rds"))
+  return(model)
+}
+
+```
+
+### logistic 
+```{r}
+run_logistic_model <- function(data, rf_formula, savepath, filename){
+  priors <- prior(horseshoe(1, par_ratio = 0.1), class="b", nlpar="riskfactors")
+
+  form <- bf(AMR_binary ~ riskfactors + re,
+          nl=TRUE)
+  form <- form + lf(re ~ 0 + (1|farm))
+  form <- form + lf(paste("riskfactors ~ ", rf_formula))
+      
+  start_time <- Sys.time()
+
+  logistic_model <- brm(form,
+                        data = data,
+                        prior = priors,
+                        family = bernoulli(link="logit"),
+                        backend = "cmdstanr",
+                        threads = threading(2), #8 cores used
+                        warmup = 1000, iter = 2000, chains = 4, cores=4)
+                        
+
+  saveRDS(logistic_model, paste0(savepath, filename))
+  
+  summary(logistic_model)
+  
+  print(Sys.time() - start_time)
+}
+
+run_logistic_model
+```
+
+
+### beta 
+```{r}
+run_beta_model <- function(data, rf_formula, savepath, filename){
+  priors <- prior(horseshoe(1), class="b", nlpar="riskfactors")
+
+  form <- bf(AMR_prop ~ riskfactors + re,
+          nl=TRUE)
+  form <- form + lf(re ~ 0 + (1|farm))
+  form <- form + lf(paste("riskfactors ~ ", rf_formula))
+      
+  start_time <- Sys.time()
+
+  beta_model <- brm(form,
+                        data = data,
+                        prior = priors,
+                        family = Beta(link="logit"),
+                        backend = "cmdstanr",
+                        threads = threading(2), #8 cores used
+                        warmup = 2000, iter = 4000, chains = 4, cores=4)
+                        
+
+  saveRDS(beta_model, paste0(savepath, filename))
+  
+  summary(beta_model)
+  
+  print(Sys.time() - start_time)
+}
+
+
+
+
+beta_format <- function(data){
+  
+all_am <- data %>%
+  select(assay, plate, count) %>%
+  filter(plate == 'ceph') %>%
+  rename('ceph' = 'count')
+
+all_plain <- data %>%
+  select(assay, plate, count) %>%
+  filter(plate == 'plain') %>%
+  rename('plain' = 'count')
+
+all_prop <- all_am %>%
+  left_join(all_plain, by = 'assay') %>%
+  select(assay, ceph, plain) %>%
+  mutate(AMR_prop = ceph/(plain*10),
+         AMR_prop = ifelse(is.na(AMR_prop), 0, AMR_prop))
+
+beta_format_data <- data %>%
+  select(-log_dilution, - plate, -count, -am) %>%
+  left_join(all_prop, by = 'assay') %>%
+  select(assay, AMR_prop, everything()) %>%
+  mutate(AMR_prop = ifelse(AMR_prop == 0, 1/10000,
+                           ifelse(AMR_prop >= 1, (1 - (1/10000)), 
+                                  AMR_prop))) %>%
+  distinct()
+
+  return(beta_format_data)
+}
+
+beta_format(ceph_data_rf_analysis) %>%
+  filter(AMR_prop > 1 )
+
+beta_format(ceph_data_rf_analysis) %>%
+  ggplot() +
+  geom_histogram(aes(x = AMR_prop)) +
+  xlim(0, 0.1)
+```
+
+
+## Beta 2-step model from thresholded Poisson
+```{r}
+run_possion_model_intercept_only <- function(data, savepath, savename){
+  chain_length <- 4000
+  custom_priors_highvar <- c(
+      set_prior('normal(0, 10)', class = 'b', nlpar = 'main'), # weak info prior
+      set_prior('normal(10, 1)', class = 'sd', nlpar = 're', group = 'assay'), # prevents this wide prior on 'true' random effects which we want with low var
+      set_prior('normal(10, 1)', class = 'sd', nlpar = 'main')# fix variance high using normal dist
+  )
+  
+  
+  model_formula <- bf(count ~ main + am * log_inv_logit(re), nl=TRUE)
+  model_formula <- model_formula + lf(main ~ offset(log_dilution) + (1|assay)) 
+  model_formula <- model_formula + lf('re ~  1 + (1|assay)')
+
+  start_time <- Sys.time()
+  
+  options(mc.cores = 8, brms.backend = "cmdstanr") # allows threading
+
+  model <- brm(
+    formula = model_formula,
+    data = as.data.frame(data), 
+    family = poisson(), 
+    prior = custom_priors_highvar,
+    iter = chain_length, warmup = chain_length/2, chains = 4, cores = 4,
+    silent = T,
+    backend = "cmdstanr",
+    threads = threading(2) #8 cores used 
+    )
+  
+  end_time <- Sys.time()
+  print(end_time - start_time)
+  
+  saveRDS(model, paste0(savepath, savename))
+  
+  return(model)
+}
+```
+
+
+```{r}
+tryLog(model <- run_possion_model_intercept_only(ceph_data_rf_analysis, save_path, 'ceph_poisson_int_only_chap4.Rds'))
+
+
+# get results
+data <- ceph_data_rf_analysis
+n_assay <- length(unique(data$assay))
+
+part1_res <- as_tibble(fitted(model,
+                              newdata = NULL,
+                              re_formula = NULL,
+                              summary = F,
+                              nlpar = "re"))
+
+part1_res_trans <- as_tibble(inv_logit_scaled(part1_res))[, 1:n_assay]
+
+ndraws <- dim(part1_res_trans)[1]
+
+part1_res_trans <- part1_res_trans %>%
+  mutate(draw = seq(1,ndraws)) %>%
+  gather(key = "x_val", value = "value", -draw) %>%
+  mutate(x_val = as.numeric(as.character(gsub("V", "", x_val)))) %>%
+  arrange(draw, x_val) 
+
+# threshold into probs
+threshold <- 0.021
+
+results <- part1_res_trans %>%
+  mutate(outcome = ifelse(value > threshold, 1, 0)) %>%
+  group_by(x_val) %>%
+  summarise(probability = mean(outcome)) 
+
+poisson_results <- cbind(data, results) %>%
+  filter(am == 1) %>%
+  mutate(AMR_prop = ifelse(probability == 0, 1/10000,
+                           ifelse(probability == 1,
+                                  1 - 1/10000,
+                                  probability)))
+
+# run beta regression
+tryLog(run_beta_model(poisson_results, rf_formula, save_path, 'ceph_horseshoe_beta_2step_021_chap4.Rds'))
+
+ ceph_horseshoe_beta_2step_021 <- readRDS(paste0(save_path, 'ceph_horseshoe_beta_2step_021_chap4.Rds'))
+ceph_horseshoe_beta_2step_021
+
+# re run schubert with q001
+tryLog(df_logistic <- schubert_format(ceph_data_rf_analysis, q = 0.001))
+tryLog(run_schubert_model(df_logistic, rf_formula, save_path, 'ceph_horseshoe_schubert_chap4_q001_test.Rds'))
+
+ceph_horseshoe_schubert_q001 <-readRDS(paste0(save_path, 'ceph_horseshoe_schubert_chap4_q001_test.Rds'))
+ceph_horseshoe_schubert_q001
+```
+
+### Running horseshoe models
+```{r}
+# schubert
+tryLog(df_logistic <- schubert_format(ceph_data_rf_analysis, q = 0.001))
+tryLog(run_schubert_model(df_logistic, rf_formula, save_path, 'ceph_horseshoe_schubert_chap4_q001_test.Rds'))
+
+# possion
+tryLog(run_possion_model_horseshoe(ceph_data_rf_analysis, make_possion_formula_horseshoe(rf_formula), save_path, 'ceph_horseshoe_poisson_chap4.Rds'))
+
+# logistic
+tryLog(run_logistic_model(df_logistic, rf_formula, save_path, 'ceph_horseshoe_logistic_chap4.Rds'))
+
+tryLog(run_logistic_model(df_logistic, rf_formula, save_path, 'ceph_horseshoe_logistic_chap4_parratio_test.Rds'))
+
+# beta
+df_beta <- beta_format(ceph_data_rf_analysis)
+tryLog(run_beta_model(df_beta, rf_formula, save_path, 'ceph_horseshoe_beta_chap4.Rds'))
+df_beta
+
+
+ceph_horseshoe_logistic <- readRDS(paste0(save_path, 'ceph_horseshoe_logistic_chap4.Rds'))
+ceph_horseshoe_poisson <- readRDS(paste0(save_path, 'ceph_horseshoe_poisson_chap4.Rds'))
+ceph_horseshoe_beta <- readRDS(paste0(save_path, 'ceph_horseshoe_beta_chap4.Rds'))
+ceph_horseshoe_schubert_q01 <-readRDS(paste0(save_path, 'ceph_horseshoe_schubert_chap4.Rds'))
+ceph_horseshoe_schubert_q001 <-readRDS(paste0(save_path, 'ceph_horseshoe_schubert_chap4_q001_test.Rds'))
+ceph_horseshoe_beta_2step_021 <- readRDS(paste0(save_path, 'ceph_horseshoe_beta_2step_021_chap4.Rds'))
+poisson_int_only <- readRDS(paste0(save_path, 'ceph_poisson_int_only_chap4.Rds'))
+
+prior_summary(ceph_horseshoe_schubert)
+ceph_horseshoe_poisson
+ceph_horseshoe_schubert
+ceph_horseshoe_beta
+
+fitted_res_log <- as.tibble(predict(ceph_horseshoe_logistic,
+                      summary = T, re_formula = NA)) %>%
+  mutate(model = 'Logistic')
+
+fitted_res_sch01 <- as.tibble(fitted(ceph_horseshoe_schubert_q01,
+                      summary = T, re_formula = NULL)) %>%
+  mutate(model = 'Senstivity-adjusted logistic, q = 0.01')
+
+fitted_res_sch001 <- as.tibble(fitted(ceph_horseshoe_schubert_q001,
+                      summary = T, re_formula = NULL)) %>%
+  mutate(model = 'Senstivity-adjusted logistic, q = 0.001')
+
+
+fitted_res_beta <- as.tibble(fitted(ceph_horseshoe_beta,
+                      summary = T, re_formula = NULL)) %>%
+  mutate(model = 'Beta')
+
+fitted_res_2beta <- as.tibble(fitted(ceph_horseshoe_beta_2step_021,
+                      summary = T, re_formula = NULL)) %>%
+  mutate(model = 'Two-step Beta')
+  
+fitted_res_pos <- as.tibble(inv_logit_scaled(fitted(poisson_int_only,
+                      summary = T, nlpar = 're', re_formula = NULL))) %>%
+  mutate(model = 'Poisson')
+
+rbind(fitted_res_log, fitted_res_sch01, fitted_res_sch001)%>%
+  ggplot() +
+  stat_halfeye(aes(x = Estimate, y = model)) +
+  theme_minimal() +
+  xlab('Probability of resistance')
+
+rbind(fitted_res_beta, fitted_res_pos)%>%
+  ggplot() +
+  stat_halfeye(aes(x = Estimate, y = model)) +
+  scale_x_continuous(trans = 'log10')
+
+fitted_res_2beta %>%
+  ggplot() +
+  stat_halfeye(aes(x = Estimate, y = model))
+
+fitted_res_pos %>%
+  distinct()
+
+exp(min(fitted_res_beta$Estimate))
+exp(max(fitted_res_beta$Estimate))
+
+fitted_res_log
+```
+
+### Results of horseshoe models
+```{r, fig.height = 5, fig.width = 7}
+median_and_CIs <- function(data){
+  med <- as.character(round(median(data), 3))
+  upp <- as.character(round(quantile(data, 0.975), 3))
+  low <- as.character(round(quantile(data, 0.025), 3))
+  sig <- ' '
+  if((upp > 0 & low > 0) | (upp < 0 & low < 0) ){
+    sig <- '*'
+  }
+  
+  return(paste0(med, ' (', low, ', ', upp, ')  ', sig))
+}
+
+get_fdr <- function(model, am, location){
+  res <- model %>%
+    spread_draws(`b_riskfactors.*`, regex = T) %>%
+    select(-.chain, -.iteration, -.draw, -b_riskfactors_Intercept) %>%
+    gather(key = 'variable', value = 'estimate') %>%
+    mutate(variable = gsub('b_riskfactors.', '', variable),
+           estimate_grouped = ifelse(estimate > 0, 1, 0))
+  
+  fdr_res <- res %>%
+    group_by(variable) %>%
+    summarise(prop_estimate = mean(estimate_grouped),
+              fdr = ifelse(prop_estimate < 0.5, prop_estimate, 1-prop_estimate),
+              coef_estimate = median_and_CIs(exp(estimate)),
+              med = median(estimate),
+              low = quantile(estimate, 0.025),
+              upp =  quantile(estimate, 0.975)) %>%
+    arrange(fdr) %>%
+    mutate(global_fdr = cummean(fdr),
+           am = as.factor(am),
+           location = as.factor(location))
+  
+  return(fdr_res)
+}
+
+get_draws_and_fdr <- function(model, am, location){
+  res <- model %>%
+    spread_draws(`b_riskfactors.*`, regex = T) %>%
+    select(-.chain, -.iteration, -.draw, -b_riskfactors_Intercept) %>%
+    gather(key = 'variable', value = 'estimate') %>%
+    mutate(estimate =  exp(estimate),
+           variable = as.factor(gsub('b_riskfactors.', '', variable)),
+           estimate_grouped = ifelse(estimate > 1, 1, 0))
+  
+  fdr <- res %>%
+    group_by(variable) %>%
+    summarise(prop_estimate = mean(estimate_grouped),
+              fdr = ifelse(prop_estimate < 0.5, prop_estimate, 1-prop_estimate)) %>%
+    arrange(fdr) %>%
+    mutate(global_fdr = cummean(fdr),
+           am = as.factor(am),
+           location = as.factor(location))
+  
+  res_and_fdr <- res %>%
+    left_join(fdr, by = 'variable')
+  
+  return(res_and_fdr)
+}
+
+all_fdr <- rbind(get_fdr(ceph_horseshoe_logistic, 'ceph', 'logisitc'),
+                 get_fdr(ceph_horseshoe_schubert_q01, 'ceph', 'schubert_q01'),
+                 get_fdr(ceph_horseshoe_schubert_q001, 'ceph', 'schubert_q001'),
+                 get_fdr(ceph_horseshoe_poisson, 'ceph', 'poisson'),
+                 get_fdr(ceph_horseshoe_beta, 'ceph', 'beta'),
+                 get_fdr(ceph_horseshoe_beta_2step_021, 'ceph', 'beta two-step'))
+all_fdr
+
+fdr_res_table <- all_fdr %>%
+  mutate(prop_estimate = round(prop_estimate, 3),
+         fdr  = round(fdr, 3),
+         global_fdr  = round(global_fdr, 3))
+
+write.csv(fdr_res_table, paste0(save_path, 'fdr_horseshoe_models.csv'))
+
+plot_horseshoe_results <- function(model, am_name, am_name_full, location_name, location_name_full, cutoff, n){
+  
+  model_fdr_draws <- get_draws_and_fdr(model, am_name, location_name) %>%
+    filter(variable != 'rainfall')
+  
+  top5 <- as.character(get_fdr(model, am_name, location_name)$variable[1:n])
+  
+  model_fdr_draws <- model_fdr_draws %>%
+    filter(variable %in% c(top5))
+  
+ # levels(model_fdr_draws$variable) <- c('Freezing (7)', 'Freezing (14)', 'Freezing (28)',
+                                        
+  
+    
+  model_fdr_draws <- model_fdr_draws %>%
+    mutate(fdr_sig = ifelse(fdr < cutoff, 'sig', 'no_sig'),
+           variable = as.character(variable)) %>%
+    arrange(-fdr)
+  
+  model_fdr_draws %>%
+    ggplot() +
+    stat_pointintervalh(aes(x = exp(estimate), y = reorder(variable, -global_fdr), colour = fdr_sig)) +
+    geom_vline(aes(xintercept = 0), linetype = 2, colour = 'grey') +
+    theme_minimal() +
+    xlab('Coefficient estimate') +
+    ylab('Predictor (ordered by FDR)') +
+    scale_colour_manual(values = c(dual_blues[2], dual_greens[2]), name = 'Local FDR',
+                      labels = c(paste0('>=', as.character(cutoff)), paste0('<', as.character(cutoff)))) +
+    ggtitle(paste0(location_name)) +
+    theme(legend.position = 'none')
+}
+
+
+
+plot_horseshoe_results(ceph_horseshoe_logistic, 'Cephalexin', 'Logistic', 'Logistic', n = 11, cutoff = 0.05) +
+  xlim(-3,3)
+plot_horseshoe_results(ceph_horseshoe_schubert_q01, 'Cephalexin', 'Schubert', 'Schubert', n = 11, cutoff = 0.05)+
+  xlim(-3,3)+
+    scale_colour_manual(values = c(dual_greens[2]))
+
+plot_horseshoe_results(ceph_horseshoe_schubert_q001, 'Cephalexin', 'Schubert', 'Schubert', n = 11, cutoff = 0.05)+
+    scale_colour_manual(values = c(dual_blues[2]))
+
+plot_horseshoe_results(ceph_horseshoe_beta, 'Cephalexin', 'Beta', 'Beta', n = 11, cutoff = 0.05)+
+  xlim(-1,1)
+plot_horseshoe_results(ceph_horseshoe_beta_2step_021, 'Cephalexin', 'Beta 2 step', 'Beta', n = 11, cutoff = 0.05)+
+  xlim(-1,1)
+plot_horseshoe_results(ceph_horseshoe_poisson, 'Cephalexin', 'Poisson', 'Poisson', n = 11, cutoff = 0.05)+
+  xlim(-3,3)
+
+plot_horseshoe_results(ceph_horseshoe_schubert_q001, 'Cephalexin', 'Schubert', 'Schubert', n = 11, cutoff = 0.05)
+
+ceph_horseshoe_schubert_q001
+```
+
+
+## Data with no plain count
+### Poisson
+```{r}
+amr_prop_df <- beta_format(ceph_data_rf_analysis) %>%
+  select(assay, AMR_prop)
+
+ceph_data_rf_analysis %>%
+  left_join(amr_prop_df, by = 'assay') %>%
+  filter()
+
+  
+all_am <- ceph_data_rf_analysis %>%
+  select(assay, plate, count) %>%
+  filter(plate == 'ceph') %>%
+  rename('ceph' = 'count')
+
+all_plain <- ceph_data_rf_analysis %>%
+  select(assay, plate, count) %>%
+  filter(plate == 'plain') %>%
+  rename('plain' = 'count')
+
+all_prop <- all_am %>%
+  left_join(all_plain, by = 'assay') %>%
+  select(assay, ceph, plain) %>%
+  mutate(AMR_prop = ceph/(plain*10),
+         AMR_prop = ifelse(is.na(AMR_prop), 0, AMR_prop))
+
+all_prop <- all_prop %>%
+  mutate(plain_new = 100, 
+         ceph_new = round(AMR_prop*plain_new*10),
+         AMR_prop_new = ceph_new/(plain_new*10))
+
+all_plain <- all_prop %>%
+  select(assay, plain_new) %>%
+  rename('count' = 'plain_new') %>%
+  mutate(plate = 'plain')
+
+all_ceph <- all_prop %>%
+  select(assay, ceph_new) %>%
+  rename('count' = 'ceph_new') %>%
+  mutate(plate = 'ceph')
+
+all_new_counts <- rbind(all_plain, all_ceph)
+
+ceph_data_rf_analysis_poisson_no_plain_info <- ceph_data_rf_analysis %>%
+  select(-count) %>%
+  left_join(all_new_counts, by = c('assay', 'plate')) %>%
+  distinct() %>%
+  select(assay, count, everything())
+all_prop %>%
+  filter(ceph != 0)
+ceph_data_rf_analysis_poisson_no_plain_info
+```
+### Schubert
+```{r}
+tryLog(df_logistic <- schubert_format(ceph_data_rf_analysis, q = 0.01))
+
+
+schubert_format_no_plain(ceph_data_rf_analysis, q = 0.01, 100)
+
+```
+
+
+## Temperature univariable
+
+
+### possion
+```{r}
+make_possion_formula_uni <- function(){
+  
+  model_formula <- bf(count ~ main + am * log_inv_logit(re),nl=TRUE)
+  model_formula <- model_formula + lf(main ~ offset(log_dilution) + (1|assay)) 
+  model_formula <- model_formula + lf('re ~  mean_week_temperature + (1|farm) + (1|assay)')
+  
+  return(model_formula)
+}
+
+```
+
+
+```{r}
+run_possion_model_uni <- function(data, model_formula, savepath, savename){
+    chain_length <- 4000
+    custom_priors_highvar <- c(
+      set_prior('normal(0, 10)', class = 'b', nlpar = 'main'), # weak info prior
+      set_prior('normal(0, 10)', class = 'b', nlpar = 're'), # weak info prior
+      set_prior('normal(10, 1)', class = 'sd', nlpar = 're', group = 'assay'), # prevents this wide prior on 'true' random effects which we want with low var
+      set_prior('normal(10, 1)', class = 'sd', nlpar = 'main')# fix variance high using normal dist
+    )
+    
+  start_time <- Sys.time()
+  
+  options(mc.cores = 8, brms.backend = "cmdstanr") # allows threading
+
+  model <- brm(
+    formula = model_formula,
+    data = as.data.frame(data), 
+    family = poisson(), 
+    prior = custom_priors_highvar,
+    iter = chain_length, warmup = chain_length/2, chains = 4, cores = 4,
+    silent = T,
+    backend = "cmdstanr",
+    threads = threading(2) #8 cores used 
+    )
+  
+  end_time <- Sys.time()
+  print(end_time - start_time)
+  
+  saveRDS(model, paste0(savepath, savename))
+  
+  return(model)
+}
+
+```
+
+### schubert
+```{r}
+schubert_format_no_plain <- function(data, q, plain_value){
+  
+outcome_only <- data %>%
+    select(assay, count, plate)
+  
+  rf_only <- data %>%
+    select(-count, -plate, -am, -log_dilution)
+  
+  plain_only <- outcome_only %>%
+    filter(plate == 'plain') %>%
+    mutate(fnr=(1-q)^plain_value, 
+               sens = 1-fnr,
+               spec=1) %>%
+    select(-fnr, -plate, -count) 
+  
+  am_only <- outcome_only %>%
+    filter(plate != 'plain') %>%
+    mutate(AMR_binary = ifelse(count == 0, 0, 1)) %>%
+    select(-plate, -count)
+  
+  data_schubert_format <- plain_only %>%
+    left_join(am_only, by = 'assay') %>%
+    left_join(rf_only, by = 'assay')
+
+  return(data_schubert_format)
+}
+```
+
+
+```{r}
+run_schubert_model_uni <- function(data, savepath, filename){
+
+  form <- bf(AMR_binary ~ (sens + spec - 1)/(1+exp(-eta)) + (1-spec),
+          nl=TRUE)
+  form <- form + nlf(eta ~ re)
+  form <- form + lf(re ~ mean_week_temperature + (1|farm))
+
+  start_time <- Sys.time()
+
+  schubert_model <- brm(form,
+                        data = data,
+                        family=bernoulli(link="identity"),
+                        backend = "cmdstanr",
+                        threads = threading(2), #8 cores used
+                        warmup = 2000, iter = 4000, chains = 4, cores=4)
+                        
+
+  saveRDS(schubert_model, paste0(savepath, filename))
+  
+  summary(schubert_model)
+  
+  print(Sys.time() - start_time)
+
+}
+
+read_in_model <- function(path, filename){
+  model <- readRDS(paste0(path, filename, ".Rds"))
+  return(model)
+}
+
+```
+
+### logistic 
+```{r}
+run_logistic_model_uni <- function(data, savepath, filename){
+
+  form <- bf(AMR_binary ~ re,
+          nl=TRUE)
+  form <- form + lf(re ~ mean_week_temperature + (1|farm))
+
+  start_time <- Sys.time()
+
+  logistic_model <- brm(form,
+                        data = data,
+                        family = bernoulli(link="logit"),
+                        backend = "cmdstanr",
+                        threads = threading(2), #8 cores used
+                        warmup = 2000, iter = 4000, chains = 4, cores=4)
+                        
+
+  saveRDS(logistic_model, paste0(savepath, filename))
+  
+  summary(logistic_model)
+  
+  print(Sys.time() - start_time)
+}
+
+
+```
+
+
+### beta 
+```{r}
+run_beta_model_uni <- function(data, savepath, filename){
+
+  form <- bf(AMR_prop ~ re,
+          nl=TRUE)
+  form <- form + lf(re ~ mean_week_temperature + (1|farm))
+
+  start_time <- Sys.time()
+
+  beta_model <- brm(form,
+                        data = data,
+                        family = Beta(link="logit"),
+                        backend = "cmdstanr",
+                        threads = threading(2), #8 cores used
+                        warmup = 2000, iter = 4000, chains = 4, cores=4)
+                        
+
+  saveRDS(beta_model, paste0(savepath, filename))
+  
+  summary(beta_model)
+  
+  print(Sys.time() - start_time)
+}
+
+
+beta_format <- function(data){
+  
+all_am <- data %>%
+  select(assay, plate, count) %>%
+  filter(plate == 'ceph') %>%
+  rename('ceph' = 'count')
+
+all_plain <- data %>%
+  select(assay, plate, count) %>%
+  filter(plate == 'plain') %>%
+  rename('plain' = 'count')
+
+all_prop <- all_am %>%
+  left_join(all_plain, by = 'assay') %>%
+  select(assay, ceph, plain) %>%
+  mutate(AMR_prop = ceph/(plain*10),
+         AMR_prop = ifelse(is.na(AMR_prop), 0, AMR_prop))
+
+beta_format_data <- data %>%
+  select(-log_dilution, - plate, -count, -am) %>%
+  left_join(all_prop, by = 'assay') %>%
+  select(assay, AMR_prop, everything()) %>%
+  mutate(AMR_prop = ifelse(AMR_prop == 0, 1/10000,
+                           ifelse(AMR_prop >= 1, (1 - (1/10000)), 
+                                  AMR_prop))) %>%
+  distinct()
+
+  return(beta_format_data)
+}
+```
+
+## Running temp uni var
+### With and without plain count info
+```{r}
+# schubert
+tryLog(df_logistic <- schubert_format(ceph_data_rf_analysis, q = 0.01))
+tryLog(run_schubert_model_uni(df_logistic, save_path, 'ceph_uni_withpc_schubert_chap4.Rds'))
+
+# possion
+tryLog(run_possion_model_uni(ceph_data_rf_analysis, make_possion_formula_uni(), save_path, 'ceph_uni_withpc_poisson_chap4.Rds'))
+
+# logistic
+tryLog(run_logistic_model_uni(df_logistic, save_path, 'ceph_uni_logistic_chap4.Rds'))
+
+# beta
+df_beta <- beta_format(ceph_data_rf_analysis)
+tryLog(run_beta_model(df_beta, rf_formula, save_path, 'ceph_uni_beta_chap4.Rds'))
+df_beta
+
+### Without plain count info - 2 only
+
+# schubert
+tryLog(df_logistic_no_plain <- schubert_format_no_plain(ceph_data_rf_analysis, q = 0.01, 100))
+tryLog(run_schubert_model_uni(df_logistic_no_plain, save_path, 'ceph_uni_without_pc_schubert_chap4.Rds'))
+
+# possion
+tryLog(run_possion_model_uni(ceph_data_rf_analysis_poisson_no_plain_info, make_possion_formula_uni(), save_path, 'ceph_uni_without_pc_poisson_chap4.Rds'))
+ceph_data_rf_analysis_poisson_no_plain_info
+
+```
+
+```{r}
+
+readRDS(paste0(save_path, 'samplelevel_vars_scaled_standard_devs.Rds'))
+readRDS(paste0(save_path, 'samplelevel_vars_scaled_means.Rds'))
+model <- ceph_uni_beta_2step_021
+model <- ceph_uni_without_pc_poisson
+ceph_uni_with_pc_schubert$data
+ceph_uni_with_pc_schubert
+
+results_tab_withCIs <- function(model, orig_data, model_name){
+
+  mu_temp_S <- 11.74363		
+  sd_temp_S <- 4.831384	
+  new_temp <- seq(-5, 20, 1)
+  n <- length(new_temp)
+  new_temp_S <- (new_temp - mu_temp_S)/sd_temp_S
+  temp_nS <- new_temp
+  
+  dummy_data <- tibble(
+    am = c(rep(0, n), rep(1, n)),
+    log_dilution = c(rep(log(0.1),n), rep(0, n)),
+    mean_week_temperature = c(rep(temp_nS, 2)),
+    mean_week_temperature_S = c(rep(new_temp_S, 2)),
+    farm = NA,
+    assay = NA,
+    sens = NA,
+    spec = NA)
+  
+  estimates <- as_tibble(inv_logit_scaled(
+                                fitted(model,
+                                       newdata = dummy_data,
+                                       re_formula = NA,
+                                       nlpar = 're', summary = T)))
+  
+  results <- cbind(estimates, dummy_data) 
+
+#mean_res <- mean(inv_logit_scaled((model %>%
+ # spread_draws(b_interaction_Intercept))$b_interaction_Intercept))
+
+results_tab <- results %>%
+    select(Estimate, Q2.5, Q97.5, mean_week_temperature) %>%
+    distinct() %>%
+    mutate(est_round = as.character(round(Estimate*100, 3)),
+           low_round = as.character(round(Q2.5*100, 3)),
+           upp_round = as.character(round(Q97.5*100, 3))) %>%
+    arrange(mean_week_temperature) %>%
+    mutate(est_ci = paste0(est_round, ' (', low_round, ' - ', upp_round, ')')) %>%
+  select(mean_week_temperature, est_ci) %>%
+  spread(key = 'mean_week_temperature', value = 'est_ci')
+
+return(results_tab)
+}
+results
+results %>%
+  mutate(lag_estimate = lag(Estimate),
+         Estimate/lag_estimate)
+
+results %>%
+  ggplot() +
+  geom_point(aes(x = mean_week_temperature, y = log10(Estimate))) 
+  scale_y_continuous(trans = 'log')
+```
+
+```{r}
+mod_df <- function(mod){
+  fix_df <- data.frame(fixef(mod))
+  fix_df$term <- row.names(fix_df)
+  tmp <- effective_sample(mod)%>%
+    mutate(Parameter=str_remove(Parameter, "b_"))%>%
+    dplyr::rename(term=Parameter, Eff.sample_size=ESS)%>%
+    filter(!term=="main_intercept")
+  fix_df <- left_join(fix_df, tmp, by=c("term"))
+  fix_df <- fix_df %>%
+    dplyr::select(term, everything(), -Est.Error) %>%
+    #arrange(desc(abs(Estimate))) %>%
+    filter(!grepl('Intercept', term)) %>%
+    mutate_at(vars(-term), exp) %>%
+    dplyr::rename(Variable=term, OR=Estimate, Lwr_CI=Q2.5, Upr_CI=Q97.5) %>%
+    mutate(sig=if_else((Lwr_CI>1&Upr_CI>1)|(Lwr_CI<1&Upr_CI<1), 1, 0))
+  sig <- filter(fix_df, sig==1)%>%
+    dplyr::select(-sig)
+  print(fix_df)
+  print(sig)
+}
+mod <- ceph_uni_with_pc_schubert
+mod_df(ceph_uni_with_pc_schubert)
+```
+
+### Beta 2-step model
+```{r}
+model <- readRDS(paste0(save_path, 'ceph_poisson_int_only_chap4.Rds'))
+
+# get results
+data <- ceph_data_rf_analysis
+n_assay <- length(unique(data$assay))
+
+part1_res <- as_tibble(fitted(model,
+                              newdata = NULL,
+                              re_formula = NULL,
+                              summary = F,
+                              nlpar = "re"))
+
+part1_res_trans <- as_tibble(inv_logit_scaled(part1_res))[, 1:n_assay]
+
+ndraws <- dim(part1_res_trans)[1]
+
+part1_res_trans <- part1_res_trans %>%
+  mutate(draw = seq(1,ndraws)) %>%
+  gather(key = "x_val", value = "value", -draw) %>%
+  mutate(x_val = as.numeric(as.character(gsub("V", "", x_val)))) %>%
+  arrange(draw, x_val) 
+
+# threshold into probs
+threshold <- 0.021
+
+results <- part1_res_trans %>%
+  mutate(outcome = ifelse(value > threshold, 1, 0)) %>%
+  group_by(x_val) %>%
+  summarise(probability = mean(outcome)) 
+
+poisson_results <- cbind(data, results) %>%
+  filter(am == 1) %>%
+  mutate(AMR_prop = ifelse(probability == 0, 1/10000,
+                           ifelse(probability == 1,
+                                  1 - 1/10000,
+                                  probability)))
+poisson_results
+# run beta regression
+tryLog(run_beta_model_uni(poisson_results, save_path, 'ceph_univar_beta_2step_021_chap4.Rds'))
+
+ceph_uni_beta_2step_021 <- readRDS(paste0(save_path, 'ceph_univar_beta_2step_021_chap4.Rds'))
+ceph_uni_beta_2step_021
+
+get_variables(ceph_horseshoe_beta_2step_021)
+beta_reg <- ceph_uni_beta_2step_021 %>%
+  spread_draws(b_re_mean_week_temperature) %>%
+  mutate(b_re_mean_week_temperature = exp(b_re_mean_week_temperature),
+         bacterial_abun = 'Without bacterial abundance',
+         model = 'Beta')
+
+mean(beta_reg$b_re_mean_week_temperature)
+
+```
+
+### Plotting results
+```{r}
+
+
+ceph_uni_with_pc_poisson <- readRDS(paste0(save_path, 'ceph_uni_withpc_poisson_chap4.Rds')) 
+ceph_uni_without_pc_poisson <- readRDS(paste0(save_path, 'ceph_uni_without_pc_poisson_chap4.Rds'))
+ceph_uni_with_pc_schubert <- readRDS(paste0(save_path, 'ceph_uni_withpc_schubert_chap4.Rds')) 
+ceph_uni_without_pc_schubert <- readRDS(paste0(save_path, 'ceph_uni_without_pc_schubert_chap4.Rds'))
+ceph_uni_beta <- readRDS(paste0(save_path, 'ceph_uni_beta_chap4.Rds')) 
+ceph_uni_logistic <- readRDS(paste0(save_path, 'ceph_uni_logistic_chap4.Rds'))
+ceph_uni_beta_2step_021 <- readRDS(paste0(save_path, 'ceph_univar_beta_2step_021_chap4.Rds'))
+
+pos_with <- ceph_uni_with_pc_poisson %>%
+  spread_draws(b_re_mean_week_temperature) %>%
+  mutate(b_re_mean_week_temperature = (b_re_mean_week_temperature),
+         bacterial_abun = 'With bacterial abundance',
+         model = 'Poisson')
+
+pos_without <- ceph_uni_without_pc_poisson %>%
+  spread_draws(b_re_mean_week_temperature) %>%
+  mutate(b_re_mean_week_temperature = (b_re_mean_week_temperature),
+         bacterial_abun = 'Without bacterial abundance',
+         model = 'Poisson')
+
+sch_with <- ceph_uni_with_pc_schubert %>%
+  spread_draws(b_re_mean_week_temperature) %>%
+  mutate(b_re_mean_week_temperature = (b_re_mean_week_temperature),
+         bacterial_abun = 'With bacterial abundance',
+         model = 'Sensitivity-adjusted logistic')
+
+sch_without <- ceph_uni_without_pc_schubert %>%
+  spread_draws(b_re_mean_week_temperature) %>%
+  mutate(b_re_mean_week_temperature = (b_re_mean_week_temperature),
+         bacterial_abun = 'Without bacterial abundance',
+         model = 'Sensitivity-adjusted logistic')
+
+beta_reg <- ceph_uni_beta %>%
+  spread_draws(b_re_mean_week_temperature) %>%
+  mutate(b_re_mean_week_temperature = (b_re_mean_week_temperature),
+         bacterial_abun = 'Without bacterial abundance',
+         model = 'Beta')
+
+logistic <- ceph_uni_logistic %>%
+  spread_draws(b_re_mean_week_temperature) %>%
+  mutate(b_re_mean_week_temperature = (b_re_mean_week_temperature),
+         bacterial_abun = 'Without bacterial abundance',
+         model = 'Logisitc')
+
+beta_reg_2_step <- ceph_uni_beta_2step_021 %>%
+  spread_draws(b_re_mean_week_temperature) %>%
+  mutate(b_re_mean_week_temperature = (b_re_mean_week_temperature),
+         bacterial_abun = 'With bacterial abundance',
+         model = 'Beta')
+
+rbind(pos_with, pos_without) %>%
+  ggplot() +
+  stat_halfeye(aes(x = b_re_mean_week_temperature, y = bacterial_abun, fill = bacterial_abun), alpha = 0.7) +
+  xlab('Log-odds, proportion of resistant isolates') +
+  geom_vline(aes(xintercept = 0 ), linetype = 2, colour = 'grey') +
+  scale_fill_manual(values = c(dual_blues[2], dual_blues[1])) +
+  theme_minimal() +
+  ylab('')
+
+mean(pos_with$b_re_mean_week_temperature)
+quantile(pos_with$b_re_mean_week_temperature, 0.025)
+quantile(pos_with$b_re_mean_week_temperature, 0.975)
+
+mean(pos_without$b_re_mean_week_temperature)
+quantile(pos_without$b_re_mean_week_temperature, 0.025)
+quantile(pos_without$b_re_mean_week_temperature, 0.975)
+               
+rbind(sch_with, sch_without) %>%
+  ggplot() +
+  stat_halfeye(aes(x = b_re_mean_week_temperature, y = bacterial_abun, fill = bacterial_abun), alpha = 0.7) +
+  xlab('Log-odds, probability of any resistance') +
+  geom_vline(aes(xintercept = 0), linetype = 2, colour = 'grey') +
+  scale_fill_manual(values = c(dual_blues[2], dual_blues[1])) +
+  theme_minimal() +
+  ylab('')
+
+mean(sch_with$b_re_mean_week_temperature)
+quantile(sch_with$b_re_mean_week_temperature, 0.025)
+quantile(sch_with$b_re_mean_week_temperature, 0.975)
+
+mean(sch_without$b_re_mean_week_temperature)
+quantile(sch_without$b_re_mean_week_temperature, 0.025)
+quantile(sch_without$b_re_mean_week_temperature, 0.975)
+
+rbind(beta_reg,beta_reg_2_step) %>%
+  ggplot() +
+  stat_halfeye(aes(x = b_re_mean_week_temperature, y = bacterial_abun, fill = bacterial_abun), alpha = 0.7) +
+  xlab('Log-odds, proportion of resistant isolates') +
+  geom_vline(aes(xintercept = 0), linetype = 2, colour = 'grey') +
+  scale_fill_manual(values = c(dual_blues[2], dual_blues[1])) +
+  theme_minimal() +
+  ylab('')
+
+mean(beta_reg$b_re_mean_week_temperature)
+quantile(beta_reg$b_re_mean_week_temperature, 0.025)
+quantile(beta_reg$b_re_mean_week_temperature, 0.975)
+
+mean(beta_reg_2_step$b_re_mean_week_temperature)
+quantile(beta_reg_2_step$b_re_mean_week_temperature, 0.025)
+quantile(beta_reg_2_step$b_re_mean_week_temperature, 0.975)
+
+pos_with_95 <- sch_with %>%
+  filter(!(b_re_mean_week_temperature > max(sch_with$b_re_mean_week_temperature, 0.975))) %>%
+  filter(!(b_re_mean_week_temperature < min(sch_with$b_re_mean_week_temperature, 0.025))) 
+
+pos_without_95 <- sch_without %>%
+  filter(!(b_re_mean_week_temperature > max(sch_without$b_re_mean_week_temperature, 0.975))) %>%
+  filter(!(b_re_mean_week_temperature < min(sch_without$b_re_mean_week_temperature, 0.025))) 
+
+beta_reg_2_step %>%
+  filter(b_re_mean_week_temperature > min(beta_reg$b_re_mean_week_temperature))
+
+pos_with_95
+pos_without_95
+pos - 82/7,600
+beta - 4,409/7,600
+schu < 0
+
+996/8000
+2,669 / 8000
+7,551 / 8000
+```
+
+```{r}
+sample_level_rf_standard_devs <- readRDS(paste0(save_path, 'samplelevel_vars_scaled_standard_devs.Rds'))
+sample_level_rf_means <- readRDS(paste0(save_path, 'samplelevel_vars_scaled_means.Rds'))
+
+visualise_temp_eff <- function(model, type){
+    temp_seq <- seq(-5, 25)
+    temp_seq_S <- (temp_seq - 11.74363)/4.831384
+    n <- length(temp_seq)
+    
+  if('type' == 'poisson'){
+    
+    dummy_data <- tibble(
+        am = c(rep(0, n), rep(1, n)),
+        log_dilution = c(rep(log(0.1),n), rep(0, n)),
+        mean_week_temperature_not_scaled = c(rep(temp_seq, 2)),
+        mean_week_temperature = c(rep(temp_seq_S, 2)),
+        farm = NA,
+        assay = NA)
+      
+    estimates <- as_tibble(inv_logit_scaled(
+                                  fitted(model,
+                                         newdata = dummy_data,
+                                         re_formula = NA,
+                                         nlpar = 're', summary = T)))
+    ests <- cbind(estimates, dummy_data)[1:n,]%>%
+      select(mean_week_temperature_not_scaled, Estimate, Q2.5, Q97.5)
+  }
+  if('type' == ''){
+  
+    dummy_data <- tibble(
+        mean_week_temperature_not_scaled = c(rep(temp_seq, 2)),
+        mean_week_temperature = c(rep(temp_seq_S, 2)),
+        farm = NA,
+        assay = NA,
+        sens = NA,
+        spec = NA)
+      
+    estimates <- as_tibble(inv_logit_scaled(
+                                  fitted(model,
+                                         newdata = dummy_data,
+                                         re_formula = NA,
+                                         nlpar = 're', summary = T)))
+    ests <- cbind(estimates, dummy_data)[1:n,] %>%
+      select(mean_week_temperature_not_scaled, Estimate, Q2.5, Q97.5)
+  }
+  return(ests)
+}
+
+
+ceph_uni_with_pc_poisson <- readRDS(paste0(save_path, 'ceph_uni_withpc_poisson_chap4.Rds')) 
+ceph_uni_without_pc_poisson <- readRDS(paste0(save_path, 'ceph_uni_without_pc_poisson_chap4.Rds'))
+ceph_uni_with_pc_schubert <- readRDS(paste0(save_path, 'ceph_uni_withpc_schubert_chap4.Rds')) 
+ceph_uni_without_pc_schubert <- readRDS(paste0(save_path, 'ceph_uni_without_pc_schubert_chap4.Rds'))
+ceph_uni_beta <- readRDS(paste0(save_path, 'ceph_uni_beta_chap4.Rds')) 
+ceph_uni_logistic <- readRDS(paste0(save_path, 'ceph_uni_logistic_chap4.Rds'))
+ceph_uni_beta_2step_021 <- readRDS(paste0(save_path, 'ceph_univar_beta_2step_021_chap4.Rds'))
+
+temp_seq <- seq(-5, 25)
+temp_seq_S <- (temp_seq - 11.74363)/4.831384
+n <- length(temp_seq)
+
+dummy_data_p <- tibble(
+    am = c(rep(0, n), rep(1, n)),
+    log_dilution = c(rep(log(0.1),n), rep(0, n)),
+    mean_week_temperature_not_scaled = c(rep(temp_seq, 2)),
+    mean_week_temperature = c(rep(temp_seq_S, 2)),
+    farm = NA,
+    assay = NA)
+  
+estimates_poisson_pc <- as_tibble(inv_logit_scaled(
+                              fitted(ceph_uni_with_pc_poisson,
+                                     newdata = dummy_data_p,
+                                     re_formula = NA,
+                                     nlpar = 're', summary = T))) %>%
+  mutate(model =  'Poisson with bacterial abundance')
+
+estimates_poisson <- as_tibble(inv_logit_scaled(
+                              fitted(ceph_uni_without_pc_poisson,
+                                     newdata = dummy_data_p,
+                                     re_formula = NA,
+                                     nlpar = 're', summary = T))) %>%
+  mutate(model =  'Poisson without bacterial abundance')
+
+  
+dummy_data_s <- tibble(
+    mean_week_temperature_not_scaled = c(rep(temp_seq, 2)),
+    mean_week_temperature = c(rep(temp_seq_S, 2)),
+    farm = NA,
+    assay = NA,
+    sens = NA,
+    spec = NA)
+  
+estimates_sch_pc <- as_tibble(inv_logit_scaled(
+                              fitted(ceph_uni_with_pc_schubert,
+                                     newdata = dummy_data_s,
+                                     re_formula = NA,
+                                     nlpar = 're', summary = T)))%>%
+  mutate(model =  'Sensitivity-adjusted with bacterial abundance')
+
+
+estimates_sch <- as_tibble(inv_logit_scaled(
+                              fitted(ceph_uni_without_pc_schubert,
+                                     newdata = dummy_data_s,
+                                     re_formula = NA,
+                                     nlpar = 're', summary = T)))%>%
+  mutate(model =  'Sensitivity-adjusted without bacterial abundance')
+
+estimates_beta <- as_tibble(inv_logit_scaled(
+                              fitted(ceph_uni_beta,
+                                     newdata = dummy_data_s,
+                                     re_formula = NA,
+                                     nlpar = 're', summary = T)))%>%
+  mutate(model =  'Beta')
+
+estimates_log <- as_tibble(inv_logit_scaled(
+                              fitted(ceph_uni_logistic,
+                                     newdata = dummy_data_s,
+                                     re_formula = NA,
+                                     nlpar = 're', summary = T)))%>%
+  mutate(model =  'Logistic')
+
+estimates_beta_2step <- as_tibble(inv_logit_scaled(
+                              fitted(ceph_uni_beta_2step_021,
+                                     newdata = dummy_data_s,
+                                     re_formula = NA,
+                                     nlpar = 're', summary = T)))%>%
+  mutate(model =  'Beta 2-step')
+    
+all_res <- cbind(dummy_data, rbind(estimates_poisson_pc, estimates_poisson, estimates_sch_pc, estimates_sch, estimates_beta,
+                        estimates_log, estimates_beta_2step))
+
+starts <- all_res %>%
+  filter(mean_week_temperature_not_scaled == -5) %>%
+  select(Estimate, model) %>%
+  rename('intercept' = 'Estimate')
+
+ all_res %>%
+   left_join(starts, by = 'model') %>%
+   ggplot() +
+    geom_line(aes(x = mean_week_temperature_not_scaled, y = Estimate - intercept, colour = model)) +
+  geom_ribbon(aes(x = mean_week_temperature_not_scaled, ymin = Q2.5 - intercept, ymax = Q97.5 -intercept, fill = model), alpha = 0.2) 
+
+```
+
+### Run times 
+```{r}
+keep_assay <- unique(ceph_data_rf_analysis$assay)[1:1000]
+ceph_data_rf_analysis_1000 <- ceph_data_rf_analysis %>%
+  filter(assay %in% c(keep_assay))
+
+tryLog(df_logistic <- schubert_format(ceph_data_rf_analysis_1000, q = 0.01))
+tryLog(run_schubert_model_uni(df_logistic, save_path, 'schubert_runtime.Rds'))
+
+# possion
+tryLog(run_possion_model_uni(ceph_data_rf_analysis_1000, make_possion_formula_uni(), save_path, 'pois_runtime.Rds'))
+
+# logistic
+tryLog(run_logistic_model_uni(df_logistic, save_path, 'logistic_run.Rds'))
+
+# beta
+df_beta <- beta_format(ceph_data_rf_analysis_1000)
+tryLog(run_beta_model_uni(df_beta, save_path, 'beta_run.Rds'))
+df_beta
+ceph_data_rf_analysis %>%
+  filter(plate == 'ceph')
+1218/4026
+```
+
+```{r, fig.width = 5, fig.height=3}
+locs_keep <- (ceph_data_rf_analysis %>%
+  filter(plate == 'plain') %>%
+  group_by(sample_type, environment) %>%
+  summarise(mean(count),
+            n = n()) %>%
+  filter(n > 100) %>%
+  mutate(sample_loc = paste0(sample_type, ' ', environment)))$sample_loc
+
+ceph_data_rf_analysis %>%
+  mutate(sample_loc = paste0(sample_type, ' ', environment)) %>%
+  filter(sample_loc %in% c(locs_keep)) %>%
+  filter(plate == 'plain') %>%
+  ggplot() +
+  geom_boxplot(aes(x = sample_loc, y = count), fill = dual_blues[2], alpha = 0.3) +
+  scale_y_continuous(trans = 'log10') +
+  theme_minimal()
+  
+```
+
+```{r}
+ceph_uni_without_pc_poisson$data
+
+ceph_data_rf_analysis
+```
+```{r}
+ceph_uni_with_pc_poisson <- readRDS(paste0(save_path, 'ceph_uni_withpc_poisson_chap4.Rds')) 
+ceph_uni_with_pc_schubert <- readRDS(paste0(save_path, 'ceph_uni_withpc_schubert_chap4.Rds')) 
+ceph_uni_beta <- readRDS(paste0(save_path, 'ceph_uni_beta_chap4.Rds')) 
+ceph_uni_logistic <- readRDS(paste0(save_path, 'ceph_uni_logistic_chap4.Rds'))
+
+summary(ceph_uni_with_pc_poisson)
+summary(ceph_uni_with_pc_schubert)
+summary(ceph_uni_beta)
+summary(ceph_uni_logistic)
+
+```
+

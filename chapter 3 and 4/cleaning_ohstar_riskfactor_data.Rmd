@@ -1,0 +1,2202 @@
+---
+title: "Cleaning OH-STAR risk factor data"
+output: html_notebook
+---
+
+# Set-up
+```{r}
+library(tidyverse)
+library(lubridate)
+library(janitor)
+library(brms)
+library(tidybayes)
+library(bayesplot)
+```
+
+### custom_corrplot function
+```{r}
+custom_corrplot <- function(df, string_select){
+  library(corrplot)
+  if(string_select != ''){
+  cor_matrix <- df %>%
+    select(contains(string_select) )
+  
+  names(cor_matrix) <- gsub(string_select, '', names(cor_matrix))
+  }
+  
+  cor_res <- cor(cor_matrix, method = 'pearson')
+  
+  coef_table_corrs <- as_tibble(cor_res) %>%
+    mutate(var = names(as_tibble(cor_res))) %>%
+    gather(key = 'var2', value = 'corr_coef', -var) %>%
+    filter(!var == var2) 
+  cor_res <- replace(cor_res, is.na(cor_res), 0)
+  corrplot(cor_res,
+         method = 'ellipse', order = 'original', type = 'lower',
+         tl.cex = 0.75,
+         mar=c(0,0,1,0))
+  
+  return(coef_table_corrs)
+}
+```
+
+### Paths
+```{r}
+data_path <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/raw/'
+save_path <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/rds_rda/risk_factor_analysis/'
+amr_data_path <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/rds_rda/modelling_uncertainty/data_with_locations/'
+data_path_hannah <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/hannah_analysis/'
+sharepoint_data_path <- '/Users/lv13916/Library/CloudStorage/OneDrive-SharedLibraries-UniversityofBristol/AMR Database - Documents/OH-STAR archive/'
+```
+
+### Data load
+```{r}
+raw_q <- read.csv(paste0(data_path, 'rf_questionairre_all_qs.csv'),
+                  na.strings	 = c('N/A', 'NA', ' '),
+                  colClasses = 'character',
+                  nrows = 54) %>% 
+  rename('farm' = 'FarmrefQ1') %>% 
+  filter(farm != '')
+
+dim(raw_q)
+
+all_data_brms <- readRDS(paste0(amr_data_path, "/brms_format_OHSTAR_locations.Rds")) %>%
+  filter(!is.na(count) & environment != "individual")
+
+min(all_data_brms$date)
+max(all_data_brms$date)
+
+raw_q
+```
+
+
+```{r}
+amox_all<- all_data_brms %>%
+  filter(plate %in% c('plain', 'amox'))
+ceph_all<- all_data_brms %>%
+  filter(plate %in% c('plain', 'ceph'))
+cipro_all<- all_data_brms %>%
+  filter(plate %in% c('plain', 'cipro'))
+strep_all<- all_data_brms %>%
+  filter(plate %in% c('plain', 'strep'))
+tetra_all<- all_data_brms %>%
+  filter(plate %in% c('plain', 'tetra'))
+```
+
+```{r}
+
+custom_priors_widergroupSD <- c(
+    set_prior('normal(10, 1)', class = 'sd', nlpar = 're'), # fix variance high using normal dist
+    set_prior('normal(10, 1)', class = 'sd', nlpar = 'main')) # fix variance high using normal dist
+
+model_formula <- bf(count ~ main + am * log_inv_logit(re),
+          nl=TRUE)
+model_formula <- model_formula + lf(main ~ offset(log_dilution) + (1|assay)) 
+model_formula <- model_formula + lf(re ~ 1 + (1|assay) + (1|farm))
+model_formula
+
+start_time <- Sys.time()
+
+mean_amoxR_farm <- brm(
+  formula = model_formula,
+  data = as.data.frame(amox_all), 
+  family = poisson(), 
+  prior = custom_priors_widergroupSD,
+  iter = 3000, warmup = 1000, chains = 4, cores = 4,
+  silent = F
+  )
+
+end_time <- Sys.time()
+print(end_time - start_time)
+
+saveRDS(mean_amoxR_farm, paste0(save_path, 'amox_prop_res_model_intercept_only.Rds'))
+
+start_time <- Sys.time()
+
+mean_cephR_farm <- brm(
+  formula = model_formula,
+  data = as.data.frame(ceph_all), 
+  family = poisson(), 
+  prior = custom_priors_widergroupSD,
+  iter = 3000, warmup = 1000, chains = 4, cores = 4,
+  silent = F
+  )
+
+end_time <- Sys.time()
+print(end_time - start_time)
+
+saveRDS(mean_cephR_farm, paste0(save_path, 'ceph_prop_res_model_intercept_only.Rds'))
+
+
+start_time <- Sys.time()
+
+mean_ciproR_farm <- brm(
+  formula = model_formula,
+  data = as.data.frame(cipro_all), 
+  family = poisson(), 
+  prior = custom_priors_widergroupSD,
+  iter = 3000, warmup = 1000, chains = 4, cores = 4,
+  silent = F
+  )
+
+end_time <- Sys.time()
+print(end_time - start_time)
+
+saveRDS(mean_ciproR_farm, paste0(save_path, 'cipro_prop_res_model_intercept_only.Rds'))
+
+
+start_time <- Sys.time()
+
+mean_strepR_farm <- brm(
+  formula = model_formula,
+  data = as.data.frame(strep_all), 
+  family = poisson(), 
+  prior = custom_priors_widergroupSD,
+  iter = 3000, warmup = 1000, chains = 4, cores = 4,
+  silent = F
+  )
+
+end_time <- Sys.time()
+print(end_time - start_time)
+
+saveRDS(mean_strepR_farm, paste0(save_path, 'strep_prop_res_model_intercept_only.Rds'))
+
+
+start_time <- Sys.time()
+
+mean_tetraR_farm <- brm(
+  formula = model_formula,
+  data = as.data.frame(tetra_all), 
+  family = poisson(), 
+  prior = custom_priors_widergroupSD,
+  iter = 3000, warmup = 1000, chains = 4, cores = 4,
+  silent = F
+  )
+
+end_time <- Sys.time()
+print(end_time - start_time)
+
+saveRDS(mean_tetraR_farm, paste0(save_path, 'tetra_prop_res_model_intercept_only.Rds'))
+
+```
+
+
+# 1) Generating prop of samples with AMR on each farm using count model
+- This is for quick visualisation of variance between risk factors and assessment for correlations
+```{r}
+estimates_prop_AMR_per_farm <- function(model){
+  newdtata_for_fitted <- model$data %>%
+    select(-count)
+
+  fitted_results <- cbind(as_tibble(inv_logit_scaled(fitted(model, newdata = newdtata_for_fitted, nlpar = 're', re_formula = NULL))), newdtata_for_fitted) 
+
+  fitted_results <- fitted_results %>%
+    filter(am == 0) %>%
+    mutate(amr_01 = ifelse(Estimate > 1e-03, 1, 0)) %>%
+    group_by(farm) %>%        
+    summarise(prop_amr_per_farm = mean(amr_01))
+  
+  return(fitted_results)
+}
+
+mean_amoxR_farm <- readRDS( paste0(save_path, 'amox_prop_res_model_intercept_only.Rds'))
+mean_cephR_farm <- readRDS( paste0(save_path, 'ceph_prop_res_model_intercept_only.Rds'))
+mean_ciproR_farm <- readRDS( paste0(save_path, 'cipro_prop_res_model_intercept_only.Rds'))
+mean_tetraR_farm <- readRDS( paste0(save_path, 'tetra_prop_res_model_intercept_only.Rds'))
+mean_strepR_farm <- readRDS( paste0(save_path, 'strep_prop_res_model_intercept_only.Rds'))
+
+
+prop_amoxR_per_farm <- estimates_prop_AMR_per_farm(mean_amoxR_farm) %>%
+  rename('prop_amoxR' = 'prop_amr_per_farm')
+prop_cephR_per_farm <- estimates_prop_AMR_per_farm(mean_cephR_farm) %>%
+  rename('prop_cephR' = 'prop_amr_per_farm')
+prop_ciproR_per_farm <- estimates_prop_AMR_per_farm(mean_ciproR_farm) %>%
+  rename('prop_ciproR' = 'prop_amr_per_farm')
+prop_tetraR_per_farm <- estimates_prop_AMR_per_farm(mean_tetraR_farm) %>%
+  rename('prop_tetraR' = 'prop_amr_per_farm')
+prop_strepR_per_farm <- estimates_prop_AMR_per_farm(mean_strepR_farm) %>%
+  rename('prop_strepR' = 'prop_amr_per_farm')
+
+prop_AMR_per_farm <- prop_amoxR_per_farm %>%
+  left_join(prop_cephR_per_farm, by = 'farm')%>%
+  left_join(prop_ciproR_per_farm, by = 'farm')%>%
+  left_join(prop_tetraR_per_farm, by = 'farm')%>%
+  left_join(prop_strepR_per_farm, by = 'farm')
+
+saveRDS(prop_AMR_per_farm, paste0(save_path, 'estimated_prop_AMR_per_farm_from_count_model.Rds'))
+
+```
+
+### Data load
+```{r}
+prop_AMR_per_farm <- readRDS(paste0(save_path, 'estimated_prop_AMR_per_farm_from_count_model.Rds'))
+prop_AMR_per_farm
+```
+
+### Animal numbers and grazing density
+- Making variables for dairy cattle numbers and inferring grazing density
+- Took mean of start and endpoint survey numbers to get av number of cows on holding
+```{r}
+# raw_q - raw questionairre data from VESC
+
+animal_numbers_data <- raw_q %>%
+  select(farm, grazed, ends_with('graze'), ends_with('no'), Q4totalcattle, starts_with('Q4no')) 
+
+to_numeric <- names(animal_numbers_data)[2:27]
+
+animal_numbers_data <- animal_numbers_data %>%
+  mutate_at(to_numeric, ~as.numeric(.)) %>% #changing char to numeric in named cols
+  mutate(Q4totalcattle = ifelse(is.na(Q4totalcattle), cattleno, Q4totalcattle)) %>% # dealing with NAs - if NA value in Q4, just use cattleno
+  mutate(av_total_cattle = (Q4totalcattle+ cattleno)/2,
+         av_total_dairy = (Q4nodairy+ totaldairyno)/2) %>% #calculating mean for each
+  mutate(
+    milkgraze = ifelse(milkgraze == 3, 0, 1), #recoding grazing categories so 1 = grazed
+    drygraze = ifelse(drygraze == 3, 0, 1),
+    youngraze = ifelse(youngraze == 3, 0, 1)) %>%
+  mutate(
+    total_grazing = (milkgraze * totaldairyno) + (youngraze*(weanedno+dairyheifno)), #calculating the total animals grazed on each farm
+    grazing_density_Ha_per_cow = ifelse(grazed/total_grazing == 0, 0,
+                                        ifelse(total_grazing == 0 | grazed == 0, 0, grazed/total_grazing)))%>%#note, this doesn't take into account time across the year grazed so won't reflect actual density on pasture
+  select(farm, av_total_cattle, av_total_dairy, grazing_density_Ha_per_cow)
+
+animal_numbers_data
+```
+
+
+# 2) Preparing covariates for model
+### Farm type
+```{r}
+farm_type <- raw_q %>%
+  filter(farm != '') %>%
+  mutate(nobeef = as.numeric(ifelse(is.na(nobeef), 0, nobeef)),
+         prop_beef = nobeef/as.numeric(totaldairyno)) %>%
+  mutate(beef_and_dairy = as.factor(ifelse(prop_beef > 0.1, 1, 0)),
+         organic = as.factor(as.numeric(Q1organic)),
+         breed = as.factor((Breed)))%>%
+  mutate(calf_pattern = as.factor(plyr::revalue(Q4calfpattern, replace = c('1' = 'tight_block',
+                                                           '2' = 'loose_block',
+                                                           '3' = 'almost_allyear',
+                                                           '4' = 'all_year_spread',
+                                                           '5' = 'all_year_conc')))) %>%
+    select(farm, beef_and_dairy, organic, breed, calf_pattern) 
+
+farm_type
+```
+### Biosecurity
+- Looking at other species contact
+```{r}
+other_species <- raw_q %>%
+  select(farm, sheepcont, goatcont, pigcont, poultrycont, equinescont) #exclude cats and dogs as little variation
+
+to_numeric <- (names(other_species)[2:6])  
+
+other_species <- other_species %>%
+  mutate_at(to_numeric, ~as.numeric(.)) %>%
+  mutate(any_other_species_contact_N = sheepcont+ goatcont+ pigcont+poultrycont+ equinescont,
+         any_other_species_contact = ifelse(any_other_species_contact_N == 0, 0, 1)) %>%
+  select(-any_other_species_contact_N)
+
+names(other_species) <- c('farm', 'sheep', 'goat', 'pig', 'poultry', 'equine', 'any_other_species_contact')
+
+other_species %>%
+  filter(!is.na(sheep)) %>%
+  mutate(col = 1) %>%
+  group_by(col) %>%
+  summarise(mean(sheep),
+            mean(goat),
+            mean(pig),
+            mean(poultry),
+            mean(equine),
+            mean(any_other_species_contact))
+
+other_species <- other_species %>%
+  filter(!is.na(sheep)) %>%
+  mutate_at(names(other_species)[2:7], ~as.factor(.)) %>%
+  droplevels()
+
+other_species
+```
+
+Vaccination/disease control
+```{r}
+raw_q_v2 <- read.csv(paste0(data_path, 'rf_questionairre.csv'),
+                  na.strings	 = c('N/A', 'NA', ' ', ''),
+                  colClasses = 'character',
+                  nrows = 54) %>% 
+  rename('farm' = 'FarmrefQ1') %>% 
+  filter(farm != '')
+raw_q_v2
+
+biosecurity <- raw_q_v2 %>%
+  select(farm, ends_with('vacc'), ends_with('in'), ends_with('source'))
+
+source_q <- names(biosecurity %>%
+  select(ends_with('source')))
+
+in_q <- names(biosecurity %>%
+  select(ends_with('in')))
+
+vac_q <- names(biosecurity %>%
+  select(ends_with('vacc')))
+
+biosecurity_edit <- biosecurity %>%
+  mutate_at(source_q, ~ifelse(. == '1', '1', '0'))%>%
+  mutate_at(source_q, ~as.numeric(.)) %>%
+  mutate_at(in_q, ~ifelse(is.na(.) | . == 0, 0, 1)) %>%
+  mutate_at(in_q, ~as.numeric(.)) %>%
+  mutate(any_bought_market = as.factor(ifelse(youngin + weanedin + heifersin + olderin + dairyin + bullsin > 0, 1, 0))) %>%
+  # note - all bought from markets so ignore 'source'
+  mutate_at(vac_q, ~ifelse(. == 'Y', 1 , 0)) %>%
+  mutate(any_vacc = as.factor(ifelse(bvdvacc + ibrvacc + leptovacc + johnesvacc + salmvacc +clostvacc + pastvacc + diarrvacc + ringvacc > 0, 1, 0))) %>%
+  mutate_at(vac_q, ~as.factor(.)) %>%
+  select(-respvacc) 
+
+biosecurity_edit <- biosecurity_edit %>%
+  select(farm, ends_with('vacc'), any_bought_market, any_vacc, -commentsvacc)
+
+biosecurity_edit
+
+# waste milk
+raw_q %>%
+  select(farm, contains('waste'), -wastedispose) %>%
+  count(dairylactwaste)
+
+raw_q %>%
+  select(farm, contains('waste'), -wastedispose) %>%
+  count(beeflactwaste)
+
+feed_waste <- raw_q %>%
+  select(farm, contains('lactwaste')) %>%
+  mutate(dairylactwaste = as.factor(dairylactwaste),
+         feedlactwaste = plyr::revalue(dairylactwaste, replace = c('1' = 'routinely_feed', '2' ='sometimes_feed', '3' = 'never_feed')),
+         )  %>%
+  select(farm, feedlactwaste)
+
+# same policy in beef and dairy for all farms, combine
+
+biosecurity_edit <- biosecurity_edit %>%
+  left_join(feed_waste, by ='farm')
+
+```
+
+
+### Productivity
+```{r}
+productivity_cols <- c('yield', 'milkprice', 'agecalf', 'Dctime')
+raw_q %>%
+  select(farm, productivity_cols)
+
+# correct anom:
+productivity_data <- raw_q %>%
+  select(farm, productivity_cols) %>%
+  mutate(agecalf = ifelse(agecalf == '2.7', '27', agecalf)) %>%
+  mutate_at(productivity_cols, ~as.numeric(.)) 
+
+productivity_data
+```
+
+### Mastitis
+```{r}
+library(lubridate)
+mastitis_cols <- c('percentdryoff', 'useSDCT', 'startSDCT',	'SCCthresh', 'firstdryoff', 'timesfirstmast', 'firstmastitis', 'daystreatmast', 'bactoscan', 'SCCav', 'mastcases', 'percentdryoff', 'injectmast')
+
+# SDCT
+# when did they start SDCT
+study_start <- all_data_brms %>%
+  group_by(farm) %>%
+  summarise(study_start_date = min(date))
+
+SDCT_start <- raw_q %>%
+  select(farm, c('useSDCT', 'startSDCT',	'SCCthresh', 'firstdryoff', 'percentdryoff')) %>%
+  left_join(farm_type, by = 'farm') %>%
+  select(-beef_and_dairy) %>%
+  left_join(study_start, by = 'farm') %>%
+  mutate(useSDCT = as.factor(useSDCT),
+         startSDCT_date = my(startSDCT),
+         time_til_study_days = as.numeric(study_start_date - startSDCT_date),
+         SDCT_time_til_study_years = ifelse(time_til_study_days < 1, 0, time_til_study_days)/365,
+         started_SDCT_cat = ifelse(SDCT_time_til_study_years < 1, 'never',
+                                   ifelse(SDCT_time_til_study_years > 1 & SDCT_time_til_study_years < 3, 'over1yrs',
+                                          ifelse(SDCT_time_til_study_years > 3 & SDCT_time_til_study_years < 5, 'over3yrs',
+                                                 ifelse(SDCT_time_til_study_years > 5, 'over5yrs',
+                                                        NA)))),
+         started_SDCT_cat = as.factor(ifelse(is.na(started_SDCT_cat), 'never', started_SDCT_cat))) 
+
+SDCT_start %>%
+  count(started_SDCT_cat)
+                                        
+
+min(all_data_brms$date)
+
+SDCT_start_edit <- SDCT_start %>%
+  select(-time_til_study_days, -startSDCT_date, -study_start_date, -startSDCT) %>%
+  mutate(firstdryoff = as.factor(as.character((ifelse(firstdryoff == 'Noraclox DC', 'Noroclox DC',
+                                                      ifelse(firstdryoff == 'Ubro Red Dr1Cow', 'Ubro Red DC', firstdryoff))))),
+         firstdryoff_class = firstdryoff,
+         firstdryoff_class = plyr::revalue(firstdryoff_class, c("Cefimam DC"	= "34_genceph",
+                                                          "Cephaguard DC"	= "34_genceph",
+                                                          "Cepravin DC"	= "12_genceph",
+                                                          "Multishield DC"	= "aminoglycoside_penicillin",
+                                                          "Noroclox DC"	= "penicillin",
+                                                          "Orbenin Extra"	= "penicillin",
+                                                          "Ubro Red DC"	= "aminoglycoside_penicillin"))) %>%
+  select(-useSDCT, )
+
+
+
+
+# Mastitis treatments
+mastitis <- raw_q %>%
+  select(farm, c('firstmastitis', 'bactoscan', 'SCCav', 'mastcases', 'percentdryoff', 'injectmast')) %>%
+  mutate_at(.vars = c('bactoscan', 'SCCav', 'mastcases', 'percentdryoff', 'injectmast'), ~as.numeric(.))
+
+mastitis %>%
+  count(firstmastitis)
+
+mastitis_edit <- mastitis %>%
+  mutate(firstmastitis = as.factor(as.character((ifelse(firstmastitis == 'Combiclav Lactating Cow', 'Combiclav LC',
+                                                      ifelse(firstmastitis == 'Noroclav Lactating Cow', 'Noroclav LC',
+                                                             ifelse(firstmastitis == 'Synulox Lactating Cow	', 'Synulox LC',firstmastitis)))))),
+         
+         firstmastitis_class = firstmastitis,
+         firstmastitis_class = plyr::revalue(firstmastitis, c("Cobactan"	= "34_genceph",
+                                                              "Combiclav LC"	= "penicillin",
+                                                              "Mastiplan LC	"	= "12_genceph",
+                                                              "Multiject IMM"	= "aminoglycoside_penicillin",
+                                                              "Orbenin LA"	= "penicillin",
+                                                              "Synulox LC"	= "penicillin",
+                                                              "Tetra-Delta"	= "aminoglycoside_penicillin_aminocoumarin",
+                                                              "Ubro Yellow" = "aminoglycoside_penicillin",
+                                                              "Ubrolexin" = "12_genceph")))
+
+mastitis_edit %>%
+  count(firstmastitis_class, firstmastitis)
+
+mastitis_edit %>%
+  left_join(prop_AMR_per_farm, by = 'farm') %>%
+  ggplot() +
+  geom_point(aes(x = SCCav, y = prop_amoxR))
+
+mastitis_edit %>%
+  left_join(prop_AMR_per_farm, by = 'farm') %>%
+  ggplot(aes(x = firstmastitis_class, y = prop_amoxR)) +
+  geom_boxplot() +
+  geom_point(position = 'jitter') + coord_flip()
+
+mastitis_edit %>%
+  left_join(prop_AMR_per_farm, by = 'farm') %>%
+  ggplot(aes(x = firstmastitis_class, y = prop_cephR)) +
+  geom_boxplot() +
+  geom_point(position = 'jitter') + coord_flip()
+
+mastitis_edit %>%
+  left_join(prop_AMR_per_farm, by = 'farm') %>%
+  ggplot(aes(x = firstmastitis_class, y = prop_amoxR)) +
+  geom_boxplot() +
+  geom_point(position = 'jitter') + coord_flip()
+
+mastitis_edit %>%
+  left_join(prop_AMR_per_farm, by = 'farm') %>%
+  ggplot() +
+  geom_boxplot(aes(x = firstmastitis_class, y = prop_amoxR)) +coord_flip()
+```
+### Management and cleaning questions
+```{r}
+tibble('n' = names(raw_q)) %>%
+  filter(str_detect(n, 'bed'))
+
+# cleanliness and management
+months_list <- as.character(month(ymd(080101) + months(0:11), label = TRUE))
+number_list <- c(paste0('0', as.character(seq(1,9))), as.character(seq(10,12)))
+
+clean_and_man <- raw_q %>%
+  select(farm, calveskept, calvefloor, calveclean, calvepen, bedmilk, bedyoung, beddry, lime, premilk,	predip,	gloves,	cluster,	cleancluster,
+         disinfect, foragetype,  bedmilk, beddry,
+         colosgive, colostype, oftencalffed,	agewean,	howmilkclean, teatclean,
+         bucketclean,	wastedispose, quarantine, Q4cullexTB, milktrough, freqwatertrough, youngtrough, calftrough) %>%
+  mutate_all(~gsub(months_list[1], number_list[1], .)) %>%
+  mutate_all(~gsub(months_list[2], number_list[2], .)) %>%
+  mutate_all(~gsub(months_list[3], number_list[3], .)) %>%
+  mutate_all(~gsub(months_list[4], number_list[4], .)) %>%
+  mutate_all(~gsub(months_list[5], number_list[5], .)) %>%
+  mutate_all(~gsub(months_list[6], number_list[6], .)) %>%
+  mutate_all(~gsub(months_list[7], number_list[7], .)) %>%
+  mutate_all(~gsub(months_list[8], number_list[8], .)) %>%
+  mutate_all(~gsub(months_list[9], number_list[9], .)) %>%
+  mutate_all(~gsub(months_list[10], number_list[10], .)) %>%
+  mutate_all(~gsub(months_list[11], number_list[11], .)) %>%
+  mutate_all(~gsub(months_list[12], number_list[12], .))
+
+sep_char_cols <- function(df, colname_str){
+  df %>%
+      separate_(colname_str, into = c(paste0(colname_str,'_A'), paste0(colname_str,'_B')), sep = '-')
+}
+
+clean_and_man <- clean_and_man %>%
+  select(farm, contains('calve'), contains('calf'), contains('young'), contains('trough'), contains('bed')) %>%
+  sep_char_cols(., 'calveskept') %>%
+  sep_char_cols(., 'calvefloor') %>%
+  sep_char_cols(., 'calveclean') %>%
+  sep_char_cols(., 'calvepen') %>%
+  sep_char_cols(., 'milktrough') %>%
+  sep_char_cols(., 'freqwatertrough') %>%
+  sep_char_cols(., 'calftrough') %>%
+  sep_char_cols(., 'youngtrough') %>%
+  sep_char_cols(., 'oftencalffed') %>%
+  sep_char_cols(., 'bedyoung') %>%
+  sep_char_cols(., 'bedmilk') %>%
+  sep_char_cols(., 'beddry') %>%
+  mutate_at(vars(matches("_")), ~as.numeric(.))
+  
+```
+1:Individual animals	 in a shed also used for older animals	 2: Individual animals in a shed not used for older animals	 3: Individual calf hutches with external pen	 4:Individual calf hutches without external pen	 5: Group pens in a shed also used for older animals	 6: Group pens in a shed not used for older animals	 7: Group calf hutches without external pen	 8: Group calf hutches with external pen
+
+What flooring types are in the main calving areas? 		categorical		1:concrete 	 2: rubber mats	 3: dirt 	 4:pasture	 5: other
+
+Water trough cleaning:
+1:daily	 2: every few days	 3: weekly	 4:monthly	 5: as needed
+```{r}
+# Kept individual or in groups - if ever kept in groups, marked as groups (0)
+clean_and_man_edit <- clean_and_man %>%
+  mutate(calveskept_B = ifelse(is.na(calveskept_B), calveskept_A, calveskept_B),
+         calves_individual = as.factor(ifelse(calveskept_A <5 & calveskept_B <5, 'ind', 'group'))) %>%
+  select(-starts_with('calveskept')) 
+
+# Flooring in calf areas - dirt or flooring? - if ever use flooring, marked as has flooring (1)
+clean_and_man_edit <- clean_and_man_edit %>%
+  mutate(calvefloor_A = ifelse(calvefloor_A == 5, NA, calvefloor_A),
+         calvefloor_B = ifelse(calvefloor_B == 5, NA, calvefloor_B),
+         calvefloor_B = ifelse(is.na(calvefloor_B), calvefloor_A, calvefloor_B),
+         calf_has_flooring = as.factor(ifelse(calvefloor_A <3 | calvefloor_B <3, 'floor', 'no_floor'))) %>%
+  select(-starts_with('calvefloor')) 
+
+
+# Water trough cleaning
+clean_and_man_edit %>%
+  count(youngtrough_A, milktrough_A, calftrough_A) %>%
+  arrange(-n)
+
+clean_and_man_edit <- clean_and_man_edit %>%
+  mutate(calftrough = recode(as.factor(calftrough_A), '1' = 'freq', '2' = 'freq', '3' = 'freq',  '4' = 'not_freq',  '5' = 'as_needed'),
+         milktrough = recode(as.factor(milktrough_A), '1' = 'freq', '2' = 'freq', '3' = 'freq',  '4' = 'not_freq',  '5' = 'as_needed'),
+         youngtrough = recode(as.factor(youngtrough_A), '1' = 'freq', '2' = 'freq', '3' = 'freq',  '4' = 'not_freq',  '5' = 'as_needed')) %>%
+  select(-contains('trough_A'), -contains('trough_B'))
+
+clean_and_man_edit %>%
+  count(calftrough, milktrough, youngtrough) %>%
+  ggplot() +
+  geom_point(aes(x = milktrough, y = youngtrough, size = n))
+
+  # leave all 3 in?
+```
+
+1:Sand	 2: Straw	 3: Sawdust	 4:Paper waste	 5: Wood waste	 6: Green bedding (RMS)	 7: Seperated digestate from AD plant	 8: Other
+```{r}
+clean_and_man_edit %>%
+  count(bedyoung_A)
+
+clean_and_man_edit %>%
+  select(contains('bed')) %>%
+  count(bedmilk_A, bedmilk_B)
+
+clean_and_man_edit %>%
+  count(beddry_A)
+
+# use bed milk only - most variation
+clean_and_man_edit <- clean_and_man_edit %>%
+  mutate(milking_cow_bedding = recode(as.factor(bedmilk_A), '1' = 'sand', '2' = 'straw', '3' = 'sawdust',  '4' = 'other',  '5' = 'other', '6' = 'other', '7' = 'other', '8' ='other')) %>%
+  select(-bedmilk_A, -bedmilk_B, -bedyoung_A, -bedyoung_B, -beddry_A, -beddry_B)
+
+# feeding calves milk
+clean_and_man_edit %>%
+  count(calveclean_A)
+
+clean_and_man_edit <- clean_and_man_edit %>%
+  mutate(calving_pen_cleaning = recode(as.factor(calveclean_A), '1' = 'freq', '2' = 'freq', '3' = 'freq',  '4' = 'not_freq',  '5' = 'not_freq', '6' = 'other')) %>%
+  select(-calveclean_A, -calveclean_B, -ends_with('_A'), -ends_with('_B'))
+
+clean_and_mananagement <- clean_and_man_edit
+clean_and_mananagement
+
+
+```
+1:After each calving	 2: After every few calvings	 3: Daily	 4:Weekly	 5: Monthly 	 6: Other
+
+
+
+
+# 3) AMU covariates
+### Calculating AMU from raw records
+```{r}
+ohstar_data_archive <- '/Users/lv13916/Library/CloudStorage/OneDrive-SharedLibraries-UniversityofBristol/AMR Database - Documents/OH-STAR archive/Confidential data/Antimicrobial usage/'
+
+am_raw <- read.csv(paste0(ohstar_data_archive, 'AM_prescriptions_2014-19.csv'),
+                  na.strings	 = c('N/A', 'NA', ' '),
+                  colClasses = 'character',
+                  nrows = 19200)
+
+am_raw <- am_raw %>%
+  select(-X, -date_formatted, -extra_info, -extra_info_1, -practice) %>%
+  rename('farm' = 'farm_ref',
+         'medicine' = 'vmd_name') %>%
+  filter(!is.na(farm)) 
+
+am_raw
+
+cattle_am_database <- read.csv(paste0('/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/synergy/data/amu/', 'abs_medicines_database_edit.csv'),
+                  na.strings	 = c('N/A', 'NA', ' '),
+                  colClasses = 'character',
+                  nrows = 302) %>%
+  select(Medicine, ActiveSubstances, Class, Use, Number.of.AM.active.ingredients, Concentration..mg.or.IU., Unit.of.concentration) %>%
+  mutate(match = 1,
+         Medicine = trimws(Medicine, which = 'both'),
+         Medicine = gsub('Linco-Spectin\xa0100', 'Linco-Spectin', Medicine),
+         Medicine = gsub('Linco-Spectin\xff100', 'Linco-Spectin', Medicine),
+          Medicine = gsub('Genta-Equine\xa9', 'Genta-Equine', Medicine))
+cattle_am_database
+names(cattle_am_database) <- c('medicine', 'active_sub', 'am_class', 'admin_type', 'number_ams', 'conc', 'conc_unit', 'match')
+cattle_am_database
+
+matched_db_amu <- am_raw %>%
+  mutate(medicine = trimws(medicine, which = 'both'),
+        medicine = gsub('%', '', medicine),
+        medicine = gsub('Linco-Spectin\xa0100', 'Linco-Spectin', medicine),
+        medicine = gsub('Linco-Spectin\xff100', 'Linco-Spectin', medicine),
+        medicine = gsub('SYNULOX RTU INJ 100ML', 'Synulox Ready-to-Use Suspension for Injection', medicine),
+        medicine = gsub('Genta-Equine\xae', 'Genta-Equine', medicine)) %>%
+  left_join(cattle_am_database, by = 'medicine') %>%
+  mutate(date = as.Date(date, '%d/%m/%Y'))
+
+# check no unmatched medicines
+matched_db_amu %>%
+  filter(is.na(match)) %>%
+  count(medicine)
+
+mg_PCU_am <- matched_db_amu %>%
+  mutate_at(.vars = c('ml', 'amount', 'conc', 'item', 'other'), ~as.numeric(.)) %>%
+  mutate(quantity = ifelse(is.na(amount), ml, amount),
+         quantity = ifelse(is.na(quantity), item, quantity),
+         quantity = ifelse(is.na(quantity), other, quantity)) %>%
+  mutate(mg = quantity * conc) %>%
+  left_join(animal_numbers_data, by = 'farm') %>%
+  mutate(mg_PCU = mg/av_total_dairy,
+         number_ams = as.numeric(number_ams))
+
+mg_PCU_am %>%
+  mutate(year = year(date)) %>%
+  filter(year %in% c(2016, 2017, 2018)) %>%
+  group_by(farm, year) %>%
+  summarise(mu_mgPCU = mean(mg_PCU)) %>%
+  filter(!is.na(mu_mgPCU)) %>%
+  ggplot() +
+  geom_line(aes(x = year, y = mu_mgPCU, group = farm))
+
+animal_numbers <- animal_numbers_data %>%
+  select(farm, av_total_dairy)
+
+mg_PCU_am %>%
+  filter(is.na(mg_PCU))
+
+mg_PCU_am %>%
+  mutate(year = year(date)) %>%
+  #filter(year %in% c(2016, 2017, 2018)) %>%
+  group_by(farm, year) %>%
+  summarise(mu_mgPCU = mean(mg_PCU)) %>%
+  filter(!is.na(mu_mgPCU)) %>%
+  count(farm) %>%
+  arrange(n)
+
+time_periods_AMU <- mg_PCU_am %>%
+  group_by(farm) %>%
+  summarise(start_record_AMU = min(date),
+            end_record_AMU = max(date)) %>%
+  mutate(time_diff_AMU = as.numeric(end_record_AMU - start_record_AMU)) %>%
+  arrange(time_diff_AMU)
+
+time_periods_AMR <- all_data_brms %>%
+  group_by(farm) %>%
+  summarise(start_record_AMR = min(date),
+            end_record_AMR = max(date)) %>%
+  mutate(time_diff_AMR = as.numeric(end_record_AMR - start_record_AMR)) %>%
+  arrange(time_diff_AMR)
+
+time_periods <- time_periods_AMU %>%
+  left_join(time_periods_AMR, by = 'farm') %>%
+  filter(farm != 'ZUMrear') %>%
+  mutate(start_diff = as.numeric(start_record_AMR - start_record_AMU ),
+         end_diff = as.numeric(end_record_AMU - end_record_AMR))
+
+time_periods %>%
+  ggplot() +
+  geom_errorbar(aes(x = farm, ymax = end_record_AMR, ymin = start_record_AMR), colour = 'blue') +
+  geom_errorbar(aes(x = farm, ymax = end_record_AMU, ymin = start_record_AMU), colour = 'red') +
+  coord_flip()
+
+AMU_record_start <- max(time_periods$start_record_AMU)
+AMU_record_end <- AMU_record_start + 365
+AMU_record_start
+AMU_record_end
+```
+- Work out days recorded for for the study period - 12 months pre and during - calculate yearly average mg_PCU from this
+
+- Not recorded 12 months before study period?
+
+- Dates we have all data for - "2016-11-28" to "2017-11-28"
+
+### Cleaning AMU data
+```{r}
+keep_mg_PCU_am <- mg_PCU_am %>%
+  filter(date < AMU_record_end) %>%
+  filter(date > AMU_record_start) %>%
+  filter(farm != 'ZUMrear')
+
+keep_mg_PCU_am %>%
+  count(farm) %>%
+  ggplot() +
+  geom_histogram(aes(x = n)) +
+  ggtitle('Number of drugs perscribed per farm')
+
+keep_mg_PCU_am <- keep_mg_PCU_am %>%
+  select(farm, date, medicine, active_sub, am_class, admin_type, number_ams, mg_PCU) %>%
+  filter(!is.na(am_class)) # remove clavulanic acid
+
+keep_mg_PCU_am %>%
+  group_by(farm, am_class, admin_type) %>%
+  summarise(total_used = sum(mg_PCU)) 
+
+further_grouping_admin_type <- tibble('admin_type' = unique(keep_mg_PCU_am$admin_type),
+       'admin_type_grouped' = c('sys', 'top', 'im', 'im', 'iu', 'sys', 'footbath', 'sys', 'top'))
+
+keep_mg_PCU_am <- keep_mg_PCU_am %>%
+  left_join(further_grouping_admin_type, by = 'admin_type')
+
+keep_mg_PCU_am %>%
+  group_by(admin_type_grouped) %>%
+  summarise(total_am = sum(mg_PCU))   
+
+```
+
+### Classes/types found in combination medicines and therefore highly correlated
+```{r}
+potentially_correlated_amclasses <- unique((keep_mg_PCU_am %>%
+  select(medicine, active_sub, am_class, admin_type_grouped, number_ams) %>%
+  distinct() %>%
+  filter(number_ams >1))$am_class)
+
+matrix_for_corr <- keep_mg_PCU_am %>%
+  filter(am_class %in% potentially_correlated_amclasses) %>%
+  group_by(farm, am_class, admin_type_grouped) %>%
+  summarise(total_use = sum(mg_PCU))%>%
+  mutate(am_class = paste0('total', am_class)) %>%
+  spread(am_class, -farm) %>%
+  ungroup() %>%
+  select(-farm) %>%
+  mutate_all(~replace(., is.na(.), 0))
+  
+im <- matrix_for_corr %>%
+  filter(admin_type_grouped == 'im')
+iu <- matrix_for_corr %>%
+  filter(admin_type_grouped == 'iu')
+footbath <- matrix_for_corr %>%
+  filter(admin_type_grouped == 'footbath')
+top <- matrix_for_corr %>%
+  filter(admin_type_grouped == 'top')
+sys <- matrix_for_corr %>%
+  filter(admin_type_grouped == 'sys')
+
+
+im <- custom_corrplot(im, 'total') %>%
+  mutate(type = 'im')
+iu <- custom_corrplot(iu, 'total') %>%
+  mutate(type = 'iu')
+footbath <- custom_corrplot(footbath, 'total') %>%
+  mutate(type = 'footbath')
+top <- custom_corrplot(top, 'total') %>%
+  mutate(type = 'top')
+sys <-custom_corrplot(sys, 'total') %>%
+  mutate(type = 'sys')
+
+rbind(im, iu, footbath, top, sys) %>%
+  filter(corr_coef > 0.5) %>%
+  arrange(corr_coef)
+
+
+```
+- Rename these highly correlated combos to split them out
+
+```{r}
+all_meds <- keep_mg_PCU_am %>%
+  select(medicine, active_sub, am_class, number_ams, admin_type, admin_type_grouped) %>%
+  distinct()
+
+new_Anisole_Sulfonamide <- all_meds %>%
+  filter(number_ams > 1) %>%
+  filter(admin_type_grouped == 'sys') %>%
+  filter(am_class %in% c('Anisole', 'Sulfonamide')) %>%
+  mutate(am_class_new = 'Anisole_Sulfonamide') %>%
+  select(medicine, am_class_new)
+
+new_Penicillin_Aminoglycoside <- all_meds %>%
+  filter(number_ams > 1) %>%
+  filter(admin_type_grouped %in% c('im', 'sys')) %>%
+  filter(am_class %in% c('Penicillin', 'Aminoglycoside')) %>%
+  mutate(am_class_new = 'Penicillin_Aminoglycoside') %>%
+  select(medicine, am_class_new)
+
+new_combo_classes <- rbind(new_Anisole_Sulfonamide, new_Penicillin_Aminoglycoside) %>%
+  distinct()
+
+new_combo_classes
+
+keep_mg_PCU_am <- keep_mg_PCU_am %>%
+  left_join(new_combo_classes, by = 'medicine') %>%
+  mutate(am_class_with_combos = ifelse(is.na(am_class_new), am_class, am_class_new)) %>%
+  select(-am_class_new)
+
+keep_mg_PCU_am
+```
+
+
+### Looking for correlations of AMU versus resistance
+```{r}
+total_am_type_use <- keep_mg_PCU_am %>%
+  group_by(farm, am_class_with_combos, admin_type_grouped) %>%
+  summarise(total_mg_PCU = sum(mg_PCU))
+
+am_use_VS_amr <- total_am_type_use %>%
+  mutate(am_class_type = paste0(am_class_with_combos, '_', toupper(admin_type_grouped))) %>%
+  ungroup()
+
+# admin type versus resistance
+am_admin_type <- am_use_VS_amr %>%
+  group_by(farm, admin_type_grouped) %>%
+  summarise(total_amu = sum(total_mg_PCU)) %>%
+  spread(admin_type_grouped, total_amu) %>%
+  ungroup() %>%
+  mutate_all(~ifelse(is.na(.), 0, .)) %>%
+  left_join(prop_AMR_per_farm, by = 'farm') %>%
+  select(-farm)
+
+am_admin_type
+
+cor_res <- cor(am_admin_type, method = 'spearman')
+  cor_res
+coef_table_corrs <- as_tibble(cor_res) %>%
+    mutate(var = names(as_tibble(cor_res))) %>%
+    gather(key = 'var2', value = 'corr_coef', -var) %>%
+    filter(!var == var2) 
+coef_table_corrs %>%
+  filter(corr_coef > 0.3 | corr_coef < -0.3 ) %>%
+  arrange(corr_coef)
+
+cor_res <- replace(cor_res, is.na(cor_res), 0)
+  corrplot(cor_res,
+         method = 'ellipse', order = 'AOE', type = 'lower',
+         tl.cex = 0.75,
+         mar=c(0,0,1,0))
+```
+
+Highly correlated combinations: 
+Ceph R and footbath use: +0.53
+Strep R and topical use: +0.35
+Tetra R and systemic use: +0.31
+
+### AM class use versus resistance
+```{r}
+# class use versus resistance
+am_class_use <- am_use_VS_amr %>%
+  group_by(farm, am_class_with_combos) %>%
+  summarise(total_amu = sum(total_mg_PCU)) %>%
+  spread(am_class_with_combos, total_amu) %>%
+  ungroup() %>%
+  mutate_all(~ifelse(is.na(.), 0, .)) %>%
+  left_join(prop_AMR_per_farm, by = 'farm') %>%
+  select(-farm)
+
+am_class_use
+
+cor_res <- cor(am_class_use, method = 'spearman')
+
+coef_table_corrs <- as_tibble(cor_res) %>%
+    mutate(var = names(as_tibble(cor_res))) %>%
+    gather(key = 'var2', value = 'corr_coef', -var) %>%
+    filter(!var == var2) 
+
+coef_table_corrs %>%
+  filter(corr_coef > 0.3 | corr_coef < -0.3 ) %>%
+  arrange(-corr_coef)
+
+cor_res <- replace(cor_res, is.na(cor_res), 0)
+  corrplot(cor_res,
+         method = 'ellipse', order = 'AOE', type = 'lower',
+         tl.cex = 0.75,
+         mar=c(0,0,1,0))
+  
+  am_use_VS_amr
+```
+Highly correlated: 
+Tetra R and tetra use: +0.42
+Cipro R and Fluoroquinolone use: +0.37
+Ceph R and Lincosamide use: +0.31
+
+### AB admin route and class use versus resistance
+
+```{r}
+# admin route and class use versus resistance
+am_class_use_and_admin_type <- am_use_VS_amr %>%
+  group_by(farm, am_class_type) %>%
+  summarise(total_amu = sum(total_mg_PCU)) %>%
+  spread(am_class_type, total_amu) %>%
+  ungroup() %>%
+  mutate_all(~ifelse(is.na(.), 0, .)) %>%
+  left_join(prop_AMR_per_farm, by = 'farm') %>%
+  select(-farm)
+
+# systemic
+sys_matrix <- am_class_use_and_admin_type %>%
+  select(starts_with('prop'), ends_with('SYS'))
+
+cor_res <- cor(sys_matrix, method = 'spearman')
+
+coef_table_corrs <- as_tibble(cor_res) %>%
+    mutate(var = names(as_tibble(cor_res))) %>%
+    gather(key = 'var2', value = 'corr_coef', -var) %>%
+    filter(!var == var2) 
+
+coef_table_corrs %>%
+  filter(corr_coef > 0.3 | corr_coef < -0.3 ) %>%
+  arrange(-corr_coef)
+
+cor_res <- replace(cor_res, is.na(cor_res), 0)
+
+corrplot(cor_res,
+         method = 'ellipse', order = 'AOE', type = 'lower',
+         tl.cex = 0.75,
+         mar=c(0,0,1,0))
+  
+
+# topical
+top_matrix <- am_class_use_and_admin_type %>%
+  select(starts_with('prop'), ends_with('TOP'))
+
+cor_res <- cor(top_matrix, method = 'spearman')
+
+coef_table_corrs <- as_tibble(cor_res) %>%
+    mutate(var = names(as_tibble(cor_res))) %>%
+    gather(key = 'var2', value = 'corr_coef', -var) %>%
+    filter(!var == var2) 
+
+coef_table_corrs %>%
+  filter(corr_coef > 0.3 | corr_coef < -0.3 ) %>%
+  arrange(-corr_coef)
+
+cor_res <- replace(cor_res, is.na(cor_res), 0)
+
+corrplot(cor_res,
+         method = 'ellipse', order = 'AOE', type = 'lower',
+         tl.cex = 0.75,
+         mar=c(0,0,1,0))
+
+# footbath
+fb_matrix <- am_class_use_and_admin_type %>%
+  select(starts_with('prop'), ends_with('FOOTBATH'))
+
+cor_res <- cor(fb_matrix, method = 'spearman')
+
+coef_table_corrs <- as_tibble(cor_res) %>%
+    mutate(var = names(as_tibble(cor_res))) %>%
+    gather(key = 'var2', value = 'corr_coef', -var) %>%
+    filter(!var == var2) 
+
+coef_table_corrs %>%
+  filter(corr_coef > 0.3 | corr_coef < -0.3 ) %>%
+  arrange(-corr_coef)
+
+cor_res <- replace(cor_res, is.na(cor_res), 0)
+
+corrplot(cor_res,
+         method = 'ellipse', order = 'AOE', type = 'lower',
+         tl.cex = 0.75,
+         mar=c(0,0,1,0))
+
+
+# im
+im_matrix <- am_class_use_and_admin_type %>%
+  select(starts_with('prop'), ends_with('IM'))
+
+cor_res <- cor(im_matrix, method = 'spearman')
+
+coef_table_corrs <- as_tibble(cor_res) %>%
+    mutate(var = names(as_tibble(cor_res))) %>%
+    gather(key = 'var2', value = 'corr_coef', -var) %>%
+    filter(!var == var2) 
+
+coef_table_corrs %>%
+  filter(corr_coef > 0.3 | corr_coef < -0.3 ) %>%
+  arrange(-corr_coef)
+
+cor_res <- replace(cor_res, is.na(cor_res), 0)
+
+corrplot(cor_res,
+         method = 'ellipse', order = 'AOE', type = 'lower',
+         tl.cex = 0.75,
+         mar=c(0,0,1,0))
+
+
+# iu
+iu_matrix <- am_class_use_and_admin_type %>%
+  select(starts_with('prop'), ends_with('IU'))
+
+cor_res <- cor(iu_matrix, method = 'spearman')
+
+coef_table_corrs <- as_tibble(cor_res) %>%
+    mutate(var = names(as_tibble(cor_res))) %>%
+    gather(key = 'var2', value = 'corr_coef', -var) %>%
+    filter(!var == var2) 
+
+coef_table_corrs %>%
+  filter(corr_coef > 0.3 | corr_coef < -0.3 ) %>%
+  arrange(-corr_coef)
+
+cor_res <- replace(cor_res, is.na(cor_res), 0)
+
+corrplot(cor_res,
+         method = 'ellipse', order = 'AOE', type = 'lower',
+         tl.cex = 0.75,
+         mar=c(0,0,1,0))
+
+```
+Highly correlated: 
+
+Fluoroquinolone_SYS	prop_ciproR	0.3714389	
+prop_strepR	Tetracycline_TOP	0.3454366	
+prop_cephR	Lincosamide_FOOTBATH	0.4059103
+prop_cephR	Macrolide_FOOTBATH	0.3920822	
+prop_ciproR	Aminoglycoside_FOOTBATH	0.3844779
+prop_ciproR	Lincosamide_FOOTBATH	0.3079274	
+1st generation Cephalosporin_IM	prop_tetraR	-0.3135440	
+
+### Making AMU covariates
+- 1st pass - Grouped by class and admin route
+```{r}
+amu_covariates <- keep_mg_PCU_am %>%
+  mutate(am_class_with_combos = gsub(' ', '_', tolower(am_class_with_combos)),
+         AM_group = paste0(toupper(admin_type_grouped), '_', am_class_with_combos)) %>%
+    group_by(farm, AM_group) %>%
+   summarise(mg_PCU_total = sum(mg_PCU)) %>%
+  spread(AM_group, -farm) %>%
+  mutate_all(~replace(., is.na(.), 0))
+```
+
+
+# 4) Creating risk factor final dataframe
+### Vars for model:
+```{r}
+animal_numbers_data_prefix <- animal_numbers_data %>%
+  left_join(farm_type, by = 'farm')
+n <- ncol(animal_numbers_data_prefix)
+names(animal_numbers_data_prefix)[2:n] <- paste0(rep('FARMTYPE_',n-1), names(animal_numbers_data_prefix)[2:n])
+animal_numbers_data_prefix
+
+productivity_data_prefix <- productivity_data
+n <- ncol(productivity_data_prefix)
+names(productivity_data_prefix)[2:n] <- paste0(rep('PROD_',n-1), names(productivity_data_prefix)[2:n])
+productivity_data_prefix
+
+mastitis_data_prefix <- mastitis_edit %>%
+  select(-firstmastitis)
+n <- ncol(mastitis_data_prefix)
+names(mastitis_data_prefix)[2:n] <- paste0(rep('MASTITIS_',n-1), names(mastitis_data_prefix)[2:n])
+mastitis_data_prefix
+
+biosecurity_prefix <- biosecurity_edit %>%
+  left_join(other_species, by ='farm') %>%
+  select(-sheep, -goat, -pig, -poultry, -equine, -pastvacc)
+n <- ncol(biosecurity_prefix)
+names(biosecurity_prefix)[2:n] <- paste0(rep('BIOSEC_',n-1), names(biosecurity_prefix)[2:n])
+biosecurity_prefix
+
+management_prefix <- clean_and_mananagement
+n <- ncol(management_prefix)
+names(management_prefix)[2:n] <- paste0(rep('MAN_',n-1), names(management_prefix)[2:n])
+management_prefix
+
+amu_covariates_prefix <- amu_covariates
+n <- ncol(amu_covariates_prefix)
+names(amu_covariates_prefix)[2:n] <- paste0(rep('AMU_',n-1), names(amu_covariates_prefix)[2:n])
+
+
+all_vars <- animal_numbers_data_prefix %>%
+  left_join(amu_covariates_prefix, by = 'farm') %>%
+  left_join(productivity_data_prefix, by = 'farm') %>%
+  left_join(mastitis_data_prefix, by = 'farm') %>%
+  left_join(biosecurity_prefix, by = 'farm') %>%
+  left_join(management_prefix, by = 'farm') 
+all_vars
+```
+
+### Scaling and imputing missing data
+```{r}
+# scaling
+all_vars_scaled <- all_vars %>%
+  mutate_if(is.numeric, funs(scale(.))) %>%
+  mutate(farm = as.factor(farm)) %>%
+  droplevels()
+
+# saving SDs for unscaling if needed 
+all_vars_scaled_standard_devs <- all_vars_scaled %>%
+  mutate(id = 1) %>%
+  group_by(id) %>%
+  summarise_if(is.numeric, funs(sd(.)))
+saveRDS(all_vars_scaled_standard_devs, paste0(save_path, 'all_vars_scaled_standard_devs.Rds'))
+
+# imputing missing data
+# if numeric and missing, replace with mean
+all_vars_scaled_nonumericNA <- all_vars_scaled %>%
+  mutate_if(is.numeric, funs(replace_na(.,mean(., na.rm = TRUE))))
+
+all_vars_scaled_nonumericNA <- all_vars_scaled_nonumericNA %>%
+  mutate(FARMTYPE_calf_pattern = as.character(FARMTYPE_calf_pattern))
+
+all_vars_scaled_noNA <- all_vars_scaled_nonumericNA %>%
+  mutate_if(is.factor,funs(as.character(.))) %>% # make all characters so that we can edit NAs
+  mutate_if(is.character,funs(ifelse(is.na(.), "Unknown", .))) %>% 
+  mutate_if(is.character,funs(as.factor(.))) %>% # turn all back to factors
+  mutate(FARMTYPE_calf_pattern = as.factor(ifelse(is.na(FARMTYPE_calf_pattern), 'Unknown', FARMTYPE_calf_pattern)))
+
+# number factor variables
+ncol(all_vars_scaled_noNA %>%
+  select_if(funs(is.factor(.))))
+
+#checking for >1 level in factors
+only_1_level <- t(all_vars_scaled_noNA  %>%
+    select_if(is.factor) %>%
+    summarise_all(funs(length(levels(.)))))
+
+as_tibble(only_1_level) %>%
+  filter(V1 == 1) # no one level onlys
+
+```
+
+
+### Removing highly correlated variables from runs
+- E.g. AMU and first line mastitis treatment shouldn't be in same model
+```{r}
+rf_data_farmlevel_AMU_classadmin <- all_vars_scaled_noNA %>%
+  select(-MASTITIS_firstmastitis_class)
+  
+rf_data_farmlevel_AMU_classadmin# 61 covariates
+
+saveRDS(rf_data_farmlevel_AMU_classadmin, paste0(save_path, 'rf_data_farmlevel_AMU_classadmin.Rds'))
+```
+
+
+# 5) Sample level covariates
+```{r}
+data_path_brms <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/rds_rda/modelling_uncertainty/data_with_locations/'
+
+all_data_brms <- readRDS(paste0(data_path_brms, "/brms_format_OHSTAR_locations.Rds")) %>%
+  filter(!is.na(count) & environment != "individual") %>%
+  select(farm, assay, count, am, plate, date, environment, sample_type, log_dilution)
+
+all_data_brms
+
+# adding weather data
+joined_weather_data_locations_lag <- readRDS(paste0(data_path_brms, 'lagged_weather_by_location.Rds')) %>%
+  select(weather_station_name, date, mean_week_temperature, mean_week_humidity)
+
+
+station_matches <- read.csv(paste0('/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/raw/met_office/', 'farm_weatherstation_matches.csv'),
+                     header = TRUE, sep = ",", na.strings	 = c('NA', '#N/A', 'N/A', 'na'), colClasses = 'character')
+station_matches <- station_matches %>%
+  mutate(weather_station_name = factor(weather_station_anon))
+levels(station_matches$weather_station_name) <- c('yeovilton', 'lyneham', 'larkhill', 'north wyke', 'chivenor')
+
+all_data_brms_with_weather <- all_data_brms %>%
+  left_join(station_matches, by = 'farm') %>%
+  left_join(joined_weather_data_locations_lag, by = c('weather_station_name', 'date')) %>%
+  select(-weather_station_anon, -weather_station_name, -X.1, -X)
+
+
+#---- Adding a season variable ---------
+all_data_brms_with_weather_season <- all_data_brms_with_weather %>%
+  mutate(season = as.factor(month(date)))
+
+levels(all_data_brms_with_weather_season$season) <- c('Winter', 'Winter', 'Spring', 'Spring', 'Spring', 'Summer', 'Summer', 'Summer', 'Autumn', 'Autumn', 'Autumn', 'Winter')
+
+all_data_brms_with_weather_season_no_zero %>%
+  select(-count)
+
+#---- Removing 0 plain count samples -------
+zero_pc_samples <- as.character((all_data_brms_with_weather_season %>%
+  filter(plate == 'plain' & count == 0) %>%
+    droplevels())$assay)
+
+zero_pc_samples
+
+all_data_brms_with_weather_season_no_zero <- all_data_brms_with_weather_season %>%
+  filter(!assay %in% c(zero_pc_samples))
+
+sample_level_rf <- all_data_brms_with_weather_season_no_zero %>% # removing non-scaled numeric cols
+  select(-count, -am, -log_dilution) %>%
+  mutate(mean_week_humidity_logit = logit_scaled(mean_week_humidity/100)) %>% # logit transforming humidity first
+  select(-mean_week_humidity)
+
+#---- Scaling and imputing missing data-----
+# scaling
+sample_level_rf_scaled <- sample_level_rf %>%
+  mutate_if(is.numeric, funs(scale(.))) %>%
+  mutate(farm = as.factor(farm)) %>%
+  droplevels()
+
+sample_level_rf_scaled
+
+# saving SDs and means for unscaling if needed 
+sample_level_rf_standard_devs <- sample_level_rf %>%
+  mutate(id = 1) %>%
+  group_by(id) %>%
+  summarise_if(is.numeric, funs(sd(.)))
+
+sample_level_rf_means <- sample_level_rf %>%
+  mutate(id = 1) %>%
+  group_by(id) %>%
+  summarise_if(is.numeric, funs(mean(.)))
+
+saveRDS(sample_level_rf_standard_devs, paste0(save_path, 'samplelevel_vars_scaled_standard_devs.Rds'))
+saveRDS(sample_level_rf_means, paste0(save_path, 'samplelevel_vars_scaled_means.Rds'))
+
+# imputing missing data
+# if numeric and missing, replace with mean
+sample_level_rf_scaled_nonumericNA <- sample_level_rf_scaled %>%
+  mutate_if(is.numeric, funs(replace_na(., mean(., na.rm = TRUE))))
+  
+sample_level_rf_scaled_noNA <- sample_level_rf_scaled_nonumericNA %>%
+  mutate_if(is.character,funs(as.factor(.))) %>%
+  mutate_if(is.factor,funs(as.character(.))) %>%
+  mutate_if(is.factor,funs(ifelse(is.na(.), "Unknown", .))) %>%
+  mutate_if(is.character,funs(as.factor(.)))
+
+sample_level_rf_scaled_noNA
+
+# number factor variables
+ncol(sample_level_rf_scaled_noNA %>%
+  select_if(funs(is.factor(.))))
+
+#checking for >1 level in factors
+only_1_level <- t(sample_level_rf_scaled_noNA  %>%
+    select_if(is.factor) %>%
+    summarise_all(funs(length(levels(.)))))
+
+as_tibble(only_1_level) %>%
+  filter(V1 == 1) # no one level onlys
+
+# adding back in am and count by assay
+final_sample_level_rf_scaled_noNA <- all_data_brms_with_weather_season_no_zero %>%
+  select(assay, count, am, plate, log_dilution)  %>%
+  left_join(sample_level_rf_scaled_noNA, by = c('assay', 'plate'))
+final_sample_level_rf_scaled_noNA
+saveRDS(final_sample_level_rf_scaled_noNA, paste0(save_path, 'sample_level_rf_scaled_noNA.Rds'))
+
+
+```
+
+# 6) Prepping and joining data
+```{r}
+rf_data_farmlevel_AMU_classadmin <- readRDS(paste0(save_path, 'rf_data_farmlevel_AMU_classadmin.Rds'))
+sample_level_rf_scaled_noNA <- readRDS(paste0(save_path, 'sample_level_rf_scaled_noNA.Rds'))
+sample_level_rf_scaled_noNA
+outcome_data_samplelevel_farmlevel
+outcome_data_samplelevel_farmlevel <- sample_level_rf_scaled_noNA %>%
+  left_join(rf_data_farmlevel_AMU_classadmin, by = c('farm')) %>%
+  droplevels()
+
+tetra_data_rf_analysis <- outcome_data_samplelevel_farmlevel %>%
+  filter(plate %in% c('plain', 'tetra')) %>%
+  droplevels()
+
+ceph_data_rf_analysis <- outcome_data_samplelevel_farmlevel %>%
+  filter(plate %in% c('plain', 'ceph')) %>%
+  droplevels()
+
+strep_data_rf_analysis <- outcome_data_samplelevel_farmlevel %>%
+  filter(plate %in% c('plain', 'strep')) %>%
+  droplevels()
+
+amox_data_rf_analysis <- outcome_data_samplelevel_farmlevel %>%
+  filter(plate %in% c('plain', 'amox')) %>%
+  droplevels()
+
+cipro_data_rf_analysis <- outcome_data_samplelevel_farmlevel %>%
+  filter(plate %in% c('plain', 'cipro')) %>%
+  droplevels()
+
+saveRDS(tetra_data_rf_analysis, paste0(save_path, 'tetra_data_rf_analysis.Rds'))
+saveRDS(ceph_data_rf_analysis, paste0(save_path, 'ceph_data_rf_analysis.Rds'))
+saveRDS(strep_data_rf_analysis, paste0(save_path, 'strep_data_rf_analysis.Rds'))
+saveRDS(amox_data_rf_analysis, paste0(save_path, 'amox_data_rf_analysis.Rds'))
+saveRDS(cipro_data_rf_analysis, paste0(save_path, 'cipro_data_rf_analysis.Rds'))
+
+
+tetra_data_rf_analysis 
+```
+
+
+# Descriptive stats
+```{r, fig.width = 8, fig.height = 8}
+tetra_data_rf_analysis
+
+
+names(tetra_data_rf_analysis)
+
+amu_by_farm <- tetra_data_rf_analysis %>%
+  select(farm, contains('AMU_')) %>%
+  unique()
+names(amu_by_farm)
+
+amu_by_farm %>%
+  ggplot() +
+  geom_histogram(aes(x = AMU_IM_penicillin_aminoglycoside))
+
+custom_corrplot(amu_by_farm, 'AMU')
+custom_corrplot(amu_by_farm, 'AMU')
+
+
+sum_by_admin <- amu_by_farm %>%
+  mutate(foot_sum = AMU_FOOTBATH_aminoglycoside + AMU_FOOTBATH_lincosamide + AMU_FOOTBATH_macrolide,
+         top_sum = AMU_TOP_amphenicol + AMU_TOP_penicillin + AMU_TOP_tetracycline,
+           im_sum = AMU_IM_1st_generation_cephalosporin + AMU_IM_4th_generation_cephalosporin + AMU_IM_penicillin + AMU_IM_penicillin_aminoglycoside,
+         iu_sum = AMU_IU_1st_generation_cephalosporin + AMU_IU_tetracycline,
+           sys_sum = AMU_SYS_1st_generation_cephalosporin + AMU_SYS_3rd_generation_cephalosporin + AMU_SYS_4th_generation_cephalosporin + AMU_SYS_aminoglycoside + AMU_SYS_amphenicol + AMU_SYS_anisole_sulfonamide + AMU_SYS_fluoroquinolone + AMU_SYS_lincosamide + AMU_SYS_macrolide + AMU_SYS_penicillin + AMU_SYS_penicillin_aminoglycoside + AMU_SYS_tetracycline) %>%
+  select(ends_with('sum'))
+
+custom_corrplot(sum_by_admin, 'sum')
+
+amu_by_farm %>%
+  mutate(top_sum = AMU_FOOTBATH_aminoglycoside + AMU_FOOTBATH_lincosamide + AMU_FOOTBATH_macrolide) %>%
+  select(top_sum)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# 7.0) Poisson model
+### Creating formula
+```{r}
+tetra_data_rf_analysis <- readRDS(paste0(save_path, 'tetra_data_rf_analysis.Rds'))
+
+# double check no missing:
+tetra_data_rf_analysis %>%
+  select_if(function(x) any(is.na(x))) %>% 
+  summarise_each(funs(sum(is.na(.))))
+
+rf <- names(tetra_data_rf_analysis %>%
+  select(-count, -am, -assay, -log_dilution, -farm, -plate))
+
+length(rf)
+
+count = 0
+rf_formula <- ''
+for (i in rf){
+  if (count == 0){
+    rf_formula <- paste(i)
+  }
+  if (count != 0) {
+    rf_formula <- paste(rf_formula, '+', i)
+  }
+  count = count + 1
+}
+
+rf_formula
+
+model_formula <- bf(count ~ main + am * log_inv_logit(riskfactors + re),nl=TRUE)
+model_formula <- model_formula + lf(main ~ offset(log_dilution) + (1|assay)) 
+model_formula <- model_formula + lf(re ~  1 + (1|assay) + (1|farm))
+model_formula <- model_formula + lf(paste("riskfactors ~ ", rf_formula))
+
+get_prior(model_formula, data = tetra_data_rf_analysis)
+```
+
+### Creating priors
+```{r}
+custom_priors_widergroupSD_horseshoe <- c(
+      set_prior("horseshoe(1)", class= 'b', nlpar = 'riskfactors'), # horseshoe prior
+      set_prior('normal(0, 5)', class = 'b', nlpar = 'main'), # weak info prior
+      set_prior('normal(10, 1)', class = 'sd', nlpar = 're', group = 'assay'), # prevents this wide prior on 'true' random effects which we want with low var
+      set_prior('normal(10, 1)', class = 'sd', nlpar = 'main')# fix variance high using normal dist
+    )
+```
+
+### Computing model
+```{r}
+start_time <- Sys.time()
+
+risk_factor_model_TETRA <- brm(
+  formula = model_formula,
+  data = as.data.frame(tetra_data_rf_analysis), 
+  family = poisson(), 
+  prior = custom_priors_widergroupSD_horseshoe,
+  iter = 5000, warmup = 2000, chains = 4, cores = 4,
+  silent = F
+  )
+
+end_time <- Sys.time()
+print(end_time - start_time)
+
+saveRDS(risk_factor_model_TETRA, paste0(save_path, 'risk_factor_model_TETRA_171122.Rds'))
+
+risk_factor_model_TETRA
+
+```
+
+
+
+# 7.1) Logistic model
+### Creating formula
+```{r}
+tetra_data_rf_analysis <- readRDS(paste0(save_path, 'tetra_data_rf_analysis.Rds'))
+
+tetra_data_rf_analysis %>%
+  filter(plate != 'plain') %>%
+  mutate(res = ifelse(count > 0, 1, 0))
+
+
+# double check no missing:
+tetra_data_rf_analysis %>%
+  select_if(function(x) any(is.na(x))) %>% 
+  summarise_each(funs(sum(is.na(.))))
+
+rf <- names(tetra_data_rf_analysis %>%
+  select(-count, -am, -assay, -log_dilution, -farm, -plate))
+
+length(rf)
+
+count = 0
+rf_formula <- ''
+for (i in rf){
+  if (count == 0){
+    rf_formula <- paste(i)
+  }
+  if (count != 0) {
+    rf_formula <- paste(rf_formula, '+', i)
+  }
+  count = count + 1
+}
+
+rf_formula
+
+model_formula <- bf(count ~ main + am * log_inv_logit(riskfactors + re),nl=TRUE)
+model_formula <- model_formula + lf(main ~ offset(log_dilution) + (1|assay)) 
+model_formula <- model_formula + lf(re ~  1 + (1|assay) + (1|farm))
+model_formula <- model_formula + lf(paste("riskfactors ~ ", rf_formula))
+
+get_prior(model_formula, data = tetra_data_rf_analysis)
+```
+
+### Creating priors
+```{r}
+custom_priors_widergroupSD_horseshoe <- c(
+      set_prior("horseshoe(1)", class= 'b', nlpar = 'riskfactors'), # horseshoe prior
+      set_prior('normal(0, 5)', class = 'b', nlpar = 'main'), # weak info prior
+      set_prior('normal(10, 1)', class = 'sd', nlpar = 're', group = 'assay'), # prevents this wide prior on 'true' random effects which we want with low var
+      set_prior('normal(10, 1)', class = 'sd', nlpar = 'main')# fix variance high using normal dist
+    )
+```
+
+### Computing model
+```{r}
+start_time <- Sys.time()
+
+risk_factor_model_TETRA <- brm(
+  formula = model_formula,
+  data = as.data.frame(tetra_data_rf_analysis), 
+  family = poisson(), 
+  prior = custom_priors_widergroupSD_horseshoe,
+  iter = 5000, warmup = 2000, chains = 4, cores = 4,
+  silent = F
+  )
+
+end_time <- Sys.time()
+print(end_time - start_time)
+
+saveRDS(risk_factor_model_TETRA, paste0(save_path, 'risk_factor_model_TETRA_171122.Rds'))
+
+risk_factor_model_TETRA
+
+```
+
+
+
+
+```{r}
+risk_factor_model_TETRA <- readRDS(paste0(save_path, 'risk_factor_model_TETRA_171122.Rds'))
+
+```
+
+
+
+
+
+```{r}
+run_poisson_model <- function(data, formula)
+```
+
+
+
+
+
+### Functions
+```{r}
+make_formula_horseshoe <- function(rf){
+  
+  count = 0
+  rf_formula <- ''
+  for (i in rf){
+    if (count == 0){
+      rf_formula <- paste(i)
+    }
+    if (count != 0) {
+      rf_formula <- paste(rf_formula, '+', i)
+    }
+    count = count + 1
+  }
+  
+  model_formula <- bf(count ~ main + am * log_inv_logit(riskfactors + re),nl=TRUE)
+  model_formula <- model_formula + lf(main ~ offset(log_dilution) + (1|assay)) 
+  model_formula <- model_formula + lf('re ~  1 + s(study_day_effect, bs ="gp") + (1|location_id) + (1|farm) + (1|assay)')
+  model_formula <- model_formula + lf(paste("riskfactors ~ ", rf_formula))
+  
+  return(model_formula)
+}
+
+run_possion_model_horseshoe <- function(data, model_formula, savepath, savename){
+    chain_length <- 4000
+    custom_priors_highvar <- c(
+      set_prior("horseshoe(1)", class= 'b', nlpar = 'riskfactors'), # horseshoe prior
+      set_prior('normal(0, 5)', class = 'b', nlpar = 'main'), # weak info prior
+      set_prior('normal(10, 1)', class = 'sd', nlpar = 're', group = 'assay'), # prevents this wide prior on 'true' random effects which we want with low var
+      set_prior('normal(10, 1)', class = 'sd', nlpar = 'main')# fix variance high using normal dist
+    )
+    
+  start_time <- Sys.time()
+  
+  options(mc.cores = 8, brms.backend = "cmdstanr") # allows threading
+
+  model <- brm(
+    formula = model_formula,
+    data = as.data.frame(data), 
+    family = poisson(), 
+    prior = custom_priors_highvar,
+    iter = chain_length, warmup = chain_length/2, chains = 4, cores = 4,
+    silent = T,
+    backend = "cmdstanr",
+    threads = threading(2) #8 cores used 
+    )
+  
+  end_time <- Sys.time()
+  print(end_time - start_time)
+  
+  saveRDS(model, paste0(savepath, savename))
+  
+  return(model)
+}
+
+run_non_horseshoe_model <- function(df, save_name){
+  model <- tryLog(run_possion_model(data = df,
+                  model_formula = make_formula_poisson_var('mean_week_humidity_S + mean_2week_humidity_S + mean_4week_humidity_S + below_freezing_1week + below_freezing_2week + below_freezing_4week + minimum_temperature_1week_S + maximum_temperature_1week_S + mean_week_temperature_S + mean_2week_temperature_S + mean_4week_temperature_S + mean_week_temperature_S * mean_week_humidity_S + mean_2week_temperature_S * mean_2week_humidity_S + mean_4week_temperature_S * mean_4week_humidity_S + s(study_day_effect, bs ="gp") + (1|location_id) + (1|farm) + (1|assay)'),
+                  savepath,
+                  savename = paste0('non_horseshoe_model', save_name, '.Rds'),
+                  chain_length = 4000))
+  return(summary(model))
+  rm(model)
+}
+
+run_non_horseshoe_model(df1_yard_ceph, 'yard_ceph')
+```
+
+### Running horseshoe prior model
+```{r}
+rf_list <- c(
+  'mean_week_humidity_S',
+  'mean_2week_humidity_S',
+  'mean_4week_humidity_S',
+  'below_freezing_1week',
+  'below_freezing_2week',
+  'below_freezing_4week',
+  'minimum_temperature_1week_S',
+  'maximum_temperature_1week_S',
+  'mean_week_temperature_S',
+  'mean_2week_temperature_S',
+  'mean_4week_temperature_S',
+  'mean_week_temperature_S*mean_week_humidity_S',
+  'mean_2week_temperature_S*mean_2week_humidity_S',
+  'mean_4week_temperature_S*mean_4week_humidity_S')
+
+rf<- make_formula_horseshoe(rf_list)
+rf
+rf_list
+# Amox
+
+run_horseshoe <- function(df, name, rf_formula){
+  horseshoe_model <- tryLog(
+                            run_possion_model_horseshoe(
+                              data = df,
+                              model_formula = rf_formula,
+                              savepath, savename = paste0('horseshoe_C1_', name, '.Rds')))
+  
+  summary(horseshoe_model)
+  rm(horseshoe_model)
+}
+
+
+
+run_horseshoe(df1_yard_amox, 'yard_amox', rf)
+run_horseshoe(df1_shed_amox, 'shed_amox', rf)
+
+run_horseshoe(df1_yard_ceph, 'yard_ceph', rf)
+run_horseshoe(df1_shed_ceph, 'shed_ceph', rf)
+
+run_horseshoe(df1_yard_strep, 'yard_strep', rf)
+run_horseshoe(df1_shed_strep, 'shed_strep', rf)
+
+run_horseshoe(df1_yard_tetra, 'yard_tetra', rf)
+run_horseshoe(df1_shed_tetra, 'shed_tetra', rf)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+# 7.1) Running model - CEPH
+### Creating formula
+```{r}
+ceph_data_rf_analysis <- readRDS(paste0(save_path, 'ceph_data_rf_analysis.Rds'))
+
+# double check no missing:
+ceph_data_rf_analysis %>%
+  select_if(function(x) any(is.na(x))) %>% 
+  summarise_each(funs(sum(is.na(.))))
+
+rf <- names(ceph_data_rf_analysis %>%
+  select(-count, -am, -assay, -log_dilution, -farm, -plate))
+
+length(rf)
+
+count = 0
+rf_formula <- ''
+for (i in rf){
+  if (count == 0){
+    rf_formula <- paste(i)
+  }
+  if (count != 0) {
+    rf_formula <- paste(rf_formula, '+', i)
+  }
+  count = count + 1
+}
+
+rf_formula
+
+model_formula <- bf(count ~ main + am * log_inv_logit(riskfactors + re),nl=TRUE)
+model_formula <- model_formula + lf(main ~ offset(log_dilution) + (1|assay)) 
+model_formula <- model_formula + lf(re ~  1 + (1|assay) + (1|farm))
+model_formula <- model_formula + lf(paste("riskfactors ~ ", rf_formula))
+
+get_prior(model_formula, data = ceph_data_rf_analysis)
+```
+
+### Creating priors
+```{r}
+custom_priors_widergroupSD_horseshoe <- c(
+    set_prior('normal(10, 1)', class = 'sd', nlpar = 're'), # fix variance high using normal dist
+    set_prior('normal(10, 1)', class = 'sd', nlpar = 'main'), # fix variance high using normal dist
+    set_prior("horseshoe(1)", class="b", nlpar = 'riskfactors'))
+```
+
+### Computing model
+```{r}
+start_time <- Sys.time()
+
+risk_factor_model_CEPH <- brm(
+  formula = model_formula,
+  data = as.data.frame(ceph_data_rf_analysis), 
+  family = poisson(), 
+  prior = custom_priors_widergroupSD_horseshoe,
+  iter = 5000, warmup = 2000, chains = 4, cores = 4,
+  silent = F
+  )
+
+end_time <- Sys.time()
+print(end_time - start_time)
+
+saveRDS(risk_factor_model_CEPH, paste0(save_path, 'risk_factor_model_CEPH_1107.Rds'))
+
+risk_factor_model_CEPH
+```
+
+# 7.2) Running model - AMOX
+### Creating formula
+```{r}
+amox_data_rf_analysis <- readRDS(paste0(save_path, 'amox_data_rf_analysis.Rds'))
+
+# double check no missing:
+amox_data_rf_analysis %>%
+  select_if(function(x) any(is.na(x))) %>% 
+  summarise_each(funs(sum(is.na(.))))
+
+rf <- names(amox_data_rf_analysis %>%
+  select(-count, -am, -assay, -log_dilution, -farm, -plate))
+
+length(rf)
+
+count = 0
+rf_formula <- ''
+for (i in rf){
+  if (count == 0){
+    rf_formula <- paste(i)
+  }
+  if (count != 0) {
+    rf_formula <- paste(rf_formula, '+', i)
+  }
+  count = count + 1
+}
+
+rf_formula
+
+model_formula <- bf(count ~ main + am * log_inv_logit(riskfactors + re),nl=TRUE)
+model_formula <- model_formula + lf(main ~ offset(log_dilution) + (1|assay)) 
+model_formula <- model_formula + lf(re ~  1 + (1|assay) + (1|farm))
+model_formula <- model_formula + lf(paste("riskfactors ~ ", rf_formula))
+
+get_prior(model_formula, data = amox_data_rf_analysis)
+```
+
+### Creating priors
+```{r}
+custom_priors_widergroupSD_horseshoe <- c(
+    set_prior('normal(10, 1)', class = 'sd', nlpar = 're'), # fix variance high using normal dist
+    set_prior('normal(10, 1)', class = 'sd', nlpar = 'main'), # fix variance high using normal dist
+    set_prior("horseshoe(1)", class="b", nlpar = 'riskfactors'))
+```
+
+### Computing model
+```{r}
+start_time <- Sys.time()
+
+risk_factor_model_AMOX <- brm(
+  formula = model_formula,
+  data = as.data.frame(amox_data_rf_analysis), 
+  family = poisson(), 
+  prior = custom_priors_widergroupSD_horseshoe,
+  iter = 5000, warmup = 2000, chains = 4, cores = 4,
+  silent = F
+  )
+
+end_time <- Sys.time()
+print(end_time - start_time)
+
+saveRDS(risk_factor_model_AMOX, paste0(save_path, 'risk_factor_model_AMOX_0909.Rds'))
+
+risk_factor_model_AMOX
+```
+
+
+
+
+
+# 7.3) Running model - STREP
+### Creating formula
+```{r}
+strep_data_rf_analysis <- readRDS(paste0(save_path, 'strep_data_rf_analysis.Rds'))
+
+# double check no missing:
+strep_data_rf_analysis %>%
+  select_if(function(x) any(is.na(x))) %>% 
+  summarise_each(funs(sum(is.na(.))))
+
+rf <- names(strep_data_rf_analysis %>%
+  select(-count, -am, -assay, -log_dilution, -farm, -plate))
+
+length(rf)
+
+count = 0
+rf_formula <- ''
+for (i in rf){
+  if (count == 0){
+    rf_formula <- paste(i)
+  }
+  if (count != 0) {
+    rf_formula <- paste(rf_formula, '+', i)
+  }
+  count = count + 1
+}
+
+rf_formula
+
+model_formula <- bf(count ~ main + am * log_inv_logit(riskfactors + re),nl=TRUE)
+model_formula <- model_formula + lf(main ~ offset(log_dilution) + (1|assay)) 
+model_formula <- model_formula + lf(re ~  1 + (1|assay) + (1|farm))
+model_formula <- model_formula + lf(paste("riskfactors ~ ", rf_formula))
+
+get_prior(model_formula, data = amox_data_rf_analysis)
+```
+
+### Creating priors
+```{r}
+custom_priors_widergroupSD_horseshoe <- c(
+    set_prior('normal(10, 1)', class = 'sd', nlpar = 're'), # fix variance high using normal dist
+    set_prior('normal(10, 1)', class = 'sd', nlpar = 'main'), # fix variance high using normal dist
+    set_prior("horseshoe(1)", class="b", nlpar = 'riskfactors'))
+```
+
+### Computing model
+```{r}
+start_time <- Sys.time()
+
+risk_factor_model_STREP <- brm(
+  formula = model_formula,
+  data = as.data.frame(strep_data_rf_analysis), 
+  family = poisson(), 
+  prior = custom_priors_widergroupSD_horseshoe,
+  iter = 5000, warmup = 2000, chains = 4, cores = 4,
+  silent = F
+  )
+
+end_time <- Sys.time()
+print(end_time - start_time)
+
+saveRDS(risk_factor_model_STREP, paste0(save_path, 'risk_factor_model_STREP_0909.Rds'))
+
+risk_factor_model_STREP
+```
+
+# 7.4) Running model - CIPRO
+### Creating formula
+```{r}
+cipro_data_rf_analysis <- readRDS(paste0(save_path, 'cipro_data_rf_analysis.Rds'))
+
+# double check no missing:
+strep_data_rf_analysis %>%
+  select_if(function(x) any(is.na(x))) %>% 
+  summarise_each(funs(sum(is.na(.))))
+
+rf <- names(cipro_data_rf_analysis %>%
+  select(-count, -am, -assay, -log_dilution, -farm, -plate))
+
+length(rf)
+
+count = 0
+rf_formula <- ''
+for (i in rf){
+  if (count == 0){
+    rf_formula <- paste(i)
+  }
+  if (count != 0) {
+    rf_formula <- paste(rf_formula, '+', i)
+  }
+  count = count + 1
+}
+
+rf_formula
+
+model_formula <- bf(count ~ main + am * log_inv_logit(riskfactors + re),nl=TRUE)
+model_formula <- model_formula + lf(main ~ offset(log_dilution) + (1|assay)) 
+model_formula <- model_formula + lf(re ~  1 + (1|assay) + (1|farm))
+model_formula <- model_formula + lf(paste("riskfactors ~ ", rf_formula))
+
+get_prior(model_formula, data = cipro_data_rf_analysis)
+```
+
+### Creating priors
+```{r}
+custom_priors_widergroupSD_horseshoe <- c(
+    set_prior('normal(10, 1)', class = 'sd', nlpar = 're'), # fix variance high using normal dist
+    set_prior('normal(10, 1)', class = 'sd', nlpar = 'main'), # fix variance high using normal dist
+    set_prior("horseshoe(1)", class="b", nlpar = 'riskfactors'))
+```
+
+### Computing model
+```{r}
+start_time <- Sys.time()
+
+risk_factor_model_CIPRO <- brm(
+  formula = model_formula,
+  data = as.data.frame(cipro_data_rf_analysis), 
+  family = poisson(), 
+  prior = custom_priors_widergroupSD_horseshoe,
+  iter = 5000, warmup = 2000, chains = 4, cores = 4,
+  silent = F
+  )
+
+end_time <- Sys.time()
+print(end_time - start_time)
+
+saveRDS(risk_factor_model_CIPRO, paste0(save_path, 'risk_factor_model_CIPRO_0909.Rds'))
+
+risk_factor_model_CIPRO
+```
+
+
+
+# 8) Analysing model results
+```{r}
+risk_factor_model_TETRA
+
+posterior <- posterior <- as.array(risk_factor_model_TETRA)
+
+var_names <- (dimnames(posterior)$variable)
+
+# sample type
+sample_type_vars <- (as_tibble(var_names) %>%
+  filter(str_detect(value, 'sample_type')| str_detect(value, 'environment')))$value
+
+p_sample_type <- mcmc_areas(
+  posterior,
+  pars = sample_type_vars,
+  prob = 0.8, # 80% intervals
+  prob_outer = 0.95, 
+  point_est = "mean"
+)
+p_sample_type
+
+# mastitis
+mastitis_vars <- (as_tibble(var_names) %>%
+  filter(str_detect(value, 'MASTITIS')))$value
+
+
+p_mastitis <- mcmc_areas(
+  posterior,
+  pars = mastitis_vars,
+  prob = 0.8, # 80% intervals
+  prob_outer = 0.95, 
+  point_est = "mean"
+)
+
+
+# AMU
+amu_systemic_vars <- (as_tibble(var_names) %>%
+  filter(str_detect(value, 'mgpcu_systemic')))$value
+amu_vars
+
+p_systemic <- mcmc_areas(
+  posterior,
+  pars = amu_systemic_vars,
+  prob = 0.8, # 80% intervals
+  prob_outer = 0.95, 
+  point_est = "mean"
+)
+
+
+amu_intramammary_vars <- (as_tibble(var_names) %>%
+  filter(str_detect(value, 'mgpcu_intramammary')))$value
+
+
+p_IM <- mcmc_areas(
+  posterior,
+  pars = amu_intramammary_vars,
+  prob = 0.8, # 80% intervals
+  prob_outer = 0.95, 
+  point_est = "mean"
+)
+
+
+amu_intrauterine_vars <- (as_tibble(var_names) %>%
+  filter(str_detect(value, 'mgpcu_intrauterine')))$value
+
+p_PU <- mcmc_areas(
+  posterior,
+  pars = amu_intrauterine_vars,
+  prob = 0.8, # 80% intervals
+  prob_outer = 0.95, 
+  point_est = "mean"
+)
+
+amu_topical_vars <- (as_tibble(var_names) %>%
+  filter(str_detect(value, 'mgpcu_topical')))$value
+
+p_topical <- mcmc_areas(
+  posterior,
+  pars = amu_topical_vars,
+  prob = 0.8, # 80% intervals
+  prob_outer = 0.95, 
+  point_est = "mean"
+)
+
+p_total <- mcmc_areas(
+  posterior,
+  pars = c('b_riskfactors_mean_mgpcu_total_mgpcu'),
+  prob = 0.8, # 80% intervals
+  prob_outer = 0.95, 
+  point_est = "mean"
+)
+
+
+# farm type
+farmtype_vars <- (as_tibble(var_names) %>%
+  filter(str_detect(value, 'FARMTYPE')))$value
+
+p_farm_type <- mcmc_areas(
+  posterior,
+  pars = farmtype_vars,
+  prob = 0.8, # 80% intervals
+  prob_outer = 0.95, 
+  point_est = "mean"
+)
+
+
+# productivity
+productivity_vars <- (as_tibble(var_names) %>%
+  filter(str_detect(value, 'PROD')))$value
+
+
+p_prod <- mcmc_areas(
+  posterior,
+  pars = productivity_vars,
+  prob = 0.8, # 80% intervals
+  prob_outer = 0.95,
+  point_est = "mean"
+)
+
+p_sample_type
+p_mastitis
+p_systemic
+p_IM
+p_PU
+p_topical
+p_total
+p_farm_type
+p_prod
+```
+
+
+```{r, fig.width = 8, fig.height=12}
+over_zero <-function(x){
+  ifelse(x<0, 0, 1)
+}
+
+mu <- function(x){
+  mean(x)
+}
+
+
+calc_global_FDR <- function(model){
+  all_draws <- model %>%
+    tidy_draws() %>%
+    select(starts_with('b_riskfactors')) %>%
+    mutate_all(., over_zero)
+  
+  transposed <- as.tibble(t(all_draws)) %>%
+    mutate(para = names(all_draws)) %>%
+    select(para, everything())
+  
+  probability_false <- as_tibble(t(all_draws %>%
+    mutate(across(names(all_draws), mu)) %>%
+    distinct())) %>%
+    mutate(para = names(all_draws)) %>%
+    rename('prob_positive_effect' = 'V1') %>%
+    select(para, prob_positive_effect)
+  
+  FDR_table <- probability_false %>%
+    mutate(local_FDR = ifelse(prob_positive_effect>0.5, 1-prob_positive_effect, prob_positive_effect)) %>%
+    arrange(local_FDR) %>%
+    mutate(global_FDR = cummean(local_FDR),
+           rank = seq(1, nrow(probability_false))) 
+  
+  
+  return(FDR_table)
+}
+
+
+tetra_FDR <- calc_global_FDR(risk_factor_model_TETRA)
+tetra_FDR
+cutoff_prob <- 0.1
+cutoff_rank <- max((tetra_FDR %>%
+  filter(global_FDR < cutoff_prob))$rank)
+cutoff_rank
+p1 <- tetra_FDR %>%
+  ggplot()+
+  geom_line(aes(x = rank, y = global_FDR)) +
+  geom_hline(yintercept = cutoff_prob, linetype=2, colour = 'red') +
+  ggtitle(paste('Cutoff rank:', as.character(cutoff_rank), 'Cutoff prob:', as.character(cutoff_prob))) +
+  ylim(0, 0.5)
+
+p2 <- tetra_FDR %>%
+  ggplot()+
+  geom_histogram(aes(x = local_FDR)) 
+
+tetra_FDR
+p1
+p2
+
+
+ranked_FDR <- (tetra_FDR %>%
+  filter(global_FDR < 0.1))$para
+
+tetra_FDR
+(tetra_FDR$global_FDR)[1:20]
+
+tetra_FDR %>%
+  select(global_FDR)
+
+risk_factor_model_TETRA
+
+tetra_FDR
+```
+
+
+```{r, fig.width = 8, fig.height=12}
+ranked_FDR_plot <- mcmc_areas(
+  posterior,
+  pars = ranked_FDR,
+  prob = 0.8, # 80% intervals
+  prob_outer = 0.999,
+  point_est = "mean"
+)
+
+ranked_FDR_plot
+```
+
+
+```{r}
+am_class_use_and_admin_type
+top_matrix <- am_class_use_and_admin_type %>%
+  select(prop_tetraR, `1st generation Cephalosporin_IM`, `Tetracycline_TOP`, `1st generation Cephalosporin_SYS`)
+top_matrix
+cor_res <- cor(top_matrix, method = 'spearman')
+
+coef_table_corrs <- as_tibble(cor_res) %>%
+    mutate(var = names(as_tibble(cor_res))) %>%
+    gather(key = 'var2', value = 'corr_coef', -var) %>%
+    filter(!var == var2) 
+
+coef_table_corrs %>%
+  filter(corr_coef > 0.3 | corr_coef < -0.3 ) %>%
+  arrange(-corr_coef)
+
+cor_res <- replace(cor_res, is.na(cor_res), 0)
+
+corrplot(cor_res,
+         method = 'ellipse', order = 'AOE', type = 'lower',
+         tl.cex = 0.75,
+         mar=c(0,0,1,0))
+```
+1st generation Cephalosporin_IM
+

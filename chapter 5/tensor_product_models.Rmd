@@ -1,0 +1,1365 @@
+---
+title: "Model building - temperature effect part D"
+output: html_notebook
+---
+
+Non-linear temp and humidity effects
+
+Te product tensor for temp:humidity effect
++ spline for seasonal
+
+Plots at different humidiities/temperatures to see splines in 2D
+Spline contour plots for interaction
+
+amox yard	4 week
+amox shed	4 week
+ceph_yard	2 week
+ceph_shed	4 week
+strep_yard	2 week
+
+
+# Set-up
+```{r}
+library(tidyverse)
+library(brms)
+options(mc.cores = 8, brms.backend = "cmdstanr") # allows threading
+library(tryCatchLog)
+library(loo)
+library(lubridate)
+library(tidybayes)
+```
+
+# Paths
+```{r}
+datapath <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/rds_rda/modelling_uncertainty/data_with_locations/'
+savepath <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/rds_rda/final_models_new/'
+```
+
+# Functions
+### Creating formula
+```{r}
+make_formula_poisson_var <- function(rf_formula){
+  
+  model_formula <- bf(count ~ main + am * log_inv_logit(interaction),nl=TRUE)
+  model_formula <- model_formula + lf(main ~ offset(log_dilution) + (1|assay)) 
+  model_formula <- model_formula + lf(paste("interaction ~ ", as.character(rf_formula)))
+  
+  return(model_formula)
+}
+
+```
+
+
+### Computing model
+```{r}
+
+run_possion_model <- function(data, model_formula, savepath, savename, chain_length){
+    if (is.na(chain_length)){
+      chain_length <- 4000
+    }
+  
+    custom_priors_highvar <- c(
+      set_prior('normal(0, 2)', class = 'b', nlpar = 'interaction'), 
+      set_prior('normal(0, 2)', class = 'b', nlpar = 'main'),
+      set_prior('normal(10, 1)', class = 'sd', nlpar = 'interaction', group = 'assay'), # prevents this wide prior on 'true' random effects which we want with low var
+      set_prior('normal(10, 1)', class = 'sd', nlpar = 'main')# fix variance high using normal dist
+    )
+    
+  start_time <- Sys.time()
+  
+  options(mc.cores = 8, brms.backend = "cmdstanr") # allows threading
+
+  model <- brm(
+    formula = model_formula,
+    data = as.data.frame(data), 
+    family = poisson(), 
+    prior = custom_priors_highvar,
+    iter = chain_length, warmup = chain_length/2, chains = 4, cores = 4,
+    silent = F,
+    backend = "cmdstanr",
+    threads = threading(2) #8 cores used 
+    )
+  
+  end_time <- Sys.time()
+  print(end_time - start_time)
+  
+  saveRDS(model, paste0(savepath, savename))
+  
+  return(model)
+}
+
+```
+
+# Reading in data
+```{r}
+df1_yard_amox <- readRDS(paste0(datapath, 'df1_yard_', 'amox', '_brms.Rds'))
+df1_shed_amox <- readRDS(paste0(datapath, 'df1_shed_', 'amox', '_brms.Rds'))
+df1_yard_ceph <- readRDS(paste0(datapath, 'df1_yard_', 'ceph', '_brms.Rds'))
+df1_shed_ceph <- readRDS(paste0(datapath, 'df1_shed_', 'ceph', '_brms.Rds'))
+df1_yard_cipro <- readRDS(paste0(datapath, 'df1_yard_', 'cipro', '_brms.Rds'))
+df1_shed_cipro <- readRDS(paste0(datapath, 'df1_shed_', 'cipro', '_brms.Rds'))
+df1_yard_strep <- readRDS(paste0(datapath, 'df1_yard_', 'strep', '_brms.Rds'))
+df1_shed_strep <- readRDS(paste0(datapath, 'df1_shed_', 'strep', '_brms.Rds'))
+df1_yard_tetra <- readRDS(paste0(datapath, 'df1_yard_', 'tetra', '_brms.Rds'))
+df1_shed_tetra <- readRDS(paste0(datapath, 'df1_shed_', 'tetra', '_brms.Rds'))
+
+```
+
+
+```{r}
+run_tensor_product <- function(df, name, spline_formula){
+  model <- tryLog(
+                            run_possion_model(
+                              data = df,
+                              model_formula = make_formula_poisson_var(paste0(spline_formula,
+                                ' + s(study_day_effect, bs ="gp", by = location_cat) + (1|location_id) + (1|farm) + (1|assay)')),
+                              savepath, savename = paste0('tensor_D1_', name, '.Rds'),
+                              chain_length = 8000))
+  
+  summary(model)
+  rm(model)
+}
+
+
+
+```
+
+```{r}
+run_tensor_product(df1_yard_amox, 'amox_yard', 't2(mean_4week_temperature_S, mean_4week_humidity_S, bs = "gp")')
+run_tensor_product(df1_shed_amox, 'amox_shed', 't2(mean_4week_temperature_S, mean_4week_humidity_S, bs = "gp")')
+
+run_tensor_product(df1_yard_ceph, 'ceph_yard', 't2(mean_2week_temperature_S, mean_2week_humidity_S, bs = "gp")')
+run_tensor_product(df1_shed_ceph, 'ceph_shed', 't2(mean_week_temperature_S, mean_week_humidity_S, bs = "gp")')
+
+run_tensor_product(df1_yard_strep, 'strep_yard', 't2(mean_2week_temperature_S, mean_2week_humidity_S, bs = "gp")')
+run_tensor_product(df1_shed_strep, 'strep_shed', 't2(mean_2week_temperature_S, mean_2week_humidity_S, bs = "gp")')
+
+run_tensor_product(df1_yard_tetra, 'tetra_yard', 't2(mean_4week_temperature_S, mean_4week_humidity_S, bs = "gp")')
+run_tensor_product(df1_shed_tetra, 'tetra_shed', 't2(mean_4week_temperature_S, mean_4week_humidity_S, bs = "gp")')
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', 'strep_shed_and_yard', '.Rds'))
+model$data
+
+model
+levels(all_strep$location_cat)
+all_strep <- rbind(df1_yard_strep, df1_shed_strep) %>%
+  mutate(farm = as.factor(farm),
+         assay = as.factor(assay)) %>%
+  droplevels() 
+all_strep
+run_tensor_product(all_strep, 'strep_shed_and_yard', 't2(mean_2week_temperature_S, mean_2week_humidity_S, bs = "gp", by = location_cat, k = 5)')
+spline_formula <- 't2(mean_2week_temperature_S, mean_2week_humidity_S, bs = "gp")'
+
+```
+
+
+am <- 'amox'
+location <- 'shed'
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+model
+am <- 'strep'
+location <- 'shed'
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+model
+
+
+
+# Visualising results
+### Plotting
+```{r}
+plot_temp_spline <- function(model, orig_data, temp_var, colour_code){
+  
+  if(temp_var == 7){
+    temp_orig_data <- orig_data$mean_week_temperature
+  }
+  
+  if(temp_var == 14){
+    temp_orig_data <- orig_data$mean_2week_temperature
+  }
+  
+  if(temp_var == 28){
+    temp_orig_data <- orig_data$mean_4week_temperature
+  }
+  
+  min_temp <- min(temp_orig_data)
+  max_temp <- max(temp_orig_data)
+  mu_temp_S <- mean(temp_orig_data)
+  sd_temp_S <- sd(temp_orig_data)
+  n <- 30
+  step <- (max_temp-min_temp)/(n-1)  
+  new_temp <- seq(min_temp, max_temp, step)
+  new_temp_S <- (new_temp - mu_temp_S)/sd_temp_S
+  
+  
+  dummy_data <- tibble(
+    x_val = rep(paste0('V', as.character(seq(1,n))), 2)) %>%
+    mutate(mean_week_temperature = c(new_temp, new_temp),
+           mean_week_temperature_S = c(new_temp_S,new_temp_S),
+           am = c(rep(0, n), rep(1, n)),
+           log_dilution = c(rep(log(0.1),n), rep(0, n)),
+           mean_week_humidity_S = 0,
+           mean_2week_humidity_S = 0,
+           mean_4week_humidity_S = 0,
+           study_day_effect = 0.5,
+           farm = NA,
+           assay = NA,
+           location_id = NA) %>%
+    select(mean_week_temperature, mean_week_temperature_S, everything())
+  
+  
+  if(temp_var == 14){
+      names(dummy_data) <- c("mean_2week_temperature", "mean_2week_temperature_S", names(dummy_data)[3:12])
+
+  }
+  
+  if(temp_var == 28){
+      names(dummy_data) <- c("mean_4week_temperature", "mean_4week_temperature_S", names(dummy_data)[3:12])
+  }
+  
+  estimates_temp <- as_tibble(inv_logit_scaled(
+                                fitted(model,
+                                       newdata = dummy_data,
+                                       re_formula = NA,
+                                       nlpar = 'interaction', summary = T)))
+  
+  results_temp <- cbind(estimates_temp, dummy_data)%>%
+    distinct()
+  
+  names(results_temp)[5] <- 'temp'
+  
+  temp_plot <- results_temp %>%
+    ggplot() +
+    geom_line(aes(x = temp, y = Estimate), colour = colour_code, size = 1.5) +
+    geom_ribbon(aes(x = temp, ymin = Q2.5, ymax = Q97.5), alpha = 0.5, fill = colour_code) +
+    theme_minimal() +
+    xlab(paste0('Mean air temperature, ', as.character(temp_var), ' days (celsius)')) +
+    ylab('Proportion resistant')
+  
+  return(temp_plot)
+}
+
+plot_humidity_spline <- function(model, orig_data, hum_var, colour_code){
+  
+  if(hum_var == 7){
+    temp_orig_data <- orig_data$mean_week_humidity
+  }
+  
+  if(hum_var == 14){
+    temp_orig_data <- orig_data$mean_2week_humidity
+  }
+  
+  if(hum_var == 28){
+    temp_orig_data <- orig_data$mean_4week_humidity
+  }
+
+  min_hum <- min(temp_orig_data)
+  max_hum <- max(temp_orig_data)
+  mu_hum_S <- mean(temp_orig_data)
+  sd_hum_S <- sd(temp_orig_data)
+  n <- 30
+  step <- (max_hum-min_hum)/(n-1)  
+  new_hum <- seq(min_hum, max_hum, step)
+  new_hum_S <- (new_hum - mu_hum_S)/sd_hum_S
+
+  
+  dummy_data <- tibble(
+    x_val = rep(paste0('V', as.character(seq(1,n))), 2)) %>%
+    mutate(am = c(rep(0, n), rep(1, n)),
+           log_dilution = c(rep(log(0.1),n), rep(0, n)),
+           mean_week_humidity = c(new_hum, new_hum),
+           mean_week_humidity_S = c(new_hum_S,new_hum_S),
+           mean_week_temperature_S = 0,
+           mean_2week_temperature_S = 0,
+           mean_4week_temperature_S = 0,
+           study_day_effect = 0.5,
+           farm = NA,
+           assay = NA,
+           location_id = NA)%>%
+      select(mean_week_humidity, mean_week_humidity_S, everything())
+  
+  
+  if(hum_var == 14){
+      names(dummy_data) <- c("mean_2week_humidity", "mean_2week_humidity_S", names(dummy_data)[3:12])
+
+  }
+  
+  if(hum_var == 28){
+      names(dummy_data) <- c("mean_4week_humidity", "mean_4week_humidity_S", names(dummy_data)[3:12])
+  }
+  
+           
+  estimates_hum <- as_tibble(inv_logit_scaled(
+                                fitted(model,
+                                       newdata = dummy_data,
+                                       re_formula = NA,
+                                       nlpar = 'interaction', summary = T))) 
+  
+  results_hum <- cbind(estimates_hum, dummy_data)%>%
+    distinct()
+  
+  names(results_hum)[5] <- 'hum'
+
+  hum_plot <- results_hum %>%
+    ggplot() +
+    geom_line(aes(x = hum, y = Estimate), colour = colour_code, size = 1.5) +
+    geom_ribbon(aes(x = hum, ymin = Q2.5, ymax = Q97.5), alpha = 0.5, fill = colour_code) +
+    theme_minimal() +
+    xlab(paste0('Mean relative humidity, ', as.character(hum_var), ' days (%)'))+
+    ylab('Proportion resistant')
+  
+  return(hum_plot)
+}
+
+```
+
+#values = c('Amoxicillin' = "#0CC6DE", 'Cephalexin' = "#024731",  'Ciprofloxacin' = "#34B233", 'Streptomycin' ="#002F5F", 'Tetracycline' ='#9672b5')) +
+
+```{r, fig.width = 5, fig.height=3}
+am <- 'amox'
+location <- 'yard'
+colour_code <- '#0CC6DE'
+var <- 28
+title <- 'Amoxicillin: Adults in collecting yards'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_temp_spline(model, orig_data, var, colour_code) 
+p2 <- plot_humidity_spline(model, orig_data, var, colour_code) 
+
+p1 + ggtitle(title) + scale_y_continuous(trans = 'log10', limits = c(1e-7, 1)) 
+p2 + ggtitle('') + scale_y_continuous(trans = 'log10', limits = c(1e-7, 1)) 
+
+model
+```
+
+```{r, fig.width = 5, fig.height=3}
+am <- 'amox'
+location <- 'shed'
+colour_code <- '#0CC6DE'
+var <- 28
+title <- 'Amoxicillin: Heifers in sheds/pens'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_temp_spline(model, orig_data, var, colour_code) 
+p2 <- plot_humidity_spline(model, orig_data, var, colour_code) 
+
+p1 + ggtitle(title) + scale_y_continuous(trans = 'log10', limits = c(1e-7, 1))
+p2 + ggtitle('') + scale_y_continuous(trans = 'log10', limits = c(1e-7, 1))
+
+model
+```
+
+
+```{r, fig.width = 5, fig.height=3}
+am <- 'ceph'
+location <- 'yard'
+colour_code <- '#34B233'
+var <- 14
+title <- 'Cephalexin: Adults in collecting yards'
+
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_temp_spline(model, orig_data, var, colour_code) 
+p2 <- plot_humidity_spline(model, orig_data, var, colour_code) 
+
+p1 + ggtitle(title) + scale_y_continuous(trans = 'log10', limits = c(1e-7, 1))
+p2 + ggtitle('') + scale_y_continuous(trans = 'log10', limits = c(1e-7, 1))
+
+model
+```
+
+```{r, fig.width = 5, fig.height=3}
+am <- 'ceph'
+location <- 'shed'
+colour_code <- '#34B233'
+var <- 7
+title <- 'Cephalexin: Heifers in sheds/pens'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_temp_spline(model, orig_data, var, colour_code) 
+p2 <- plot_humidity_spline(model, orig_data, var, colour_code) 
+
+p1 + ggtitle(title) + scale_y_continuous(trans = 'log10', limits = c(1e-7, 1))
+p2 + ggtitle('') + scale_y_continuous(trans = 'log10', limits = c(1e-7, 1))
+
+model
+```
+
+
+```{r, fig.width = 5, fig.height=3}
+am <- 'strep'
+location <- 'yard'
+colour_code <- '#002F5F'
+var <- 14
+title <- 'Streptomycin: Adults in collecting yards'
+
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_temp_spline(model, orig_data, var, colour_code) 
+p2 <- plot_humidity_spline(model, orig_data, var, colour_code) 
+
+p1 + ggtitle(title) + scale_y_continuous(trans = 'log10', limits = c(1e-7, 1))
+p2 + ggtitle('') + scale_y_continuous(trans = 'log10', limits = c(1e-7, 1))
+
+model
+```
+
+```{r, fig.width = 5, fig.height=3}
+am <- 'strep'
+location <- 'shed'
+colour_code <- '#002F5F'
+var <- 14
+title <- 'Streptomycin: Heifers in sheds/pens'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_temp_spline(model, orig_data, var, colour_code) 
+p2 <- plot_humidity_spline(model, orig_data, var, colour_code) 
+
+p1 + ggtitle(title) + scale_y_continuous(trans = 'log10', limits = c(1e-7, 1))
+p2 + ggtitle('') + scale_y_continuous(trans = 'log10', limits = c(1e-7, 1))
+
+
+
+```
+
+```{r, fig.width = 5, fig.height=3}
+am <- 'tetra'
+location <- 'yard'
+colour_code <- '#9672b5'
+var <- 28
+title <- 'Tetracycline: Adults in collecting yards'
+
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_temp_spline(model, orig_data, var, colour_code)
+p2 <- plot_humidity_spline(model, orig_data, var, colour_code)
+
+p1 + ggtitle(title) + scale_y_continuous(trans = 'log10', limits = c(1e-7, 1))
+p2 + ggtitle('') + scale_y_continuous(trans = 'log10', limits = c(1e-7, 1))
+
+model
+```
+
+```{r, fig.width = 5, fig.height=3}
+am <- 'tetra'
+location <- 'shed'
+colour_code <- '#9672b5'
+var <- 28
+title <- 'Tetracycline: Heifers in sheds/pens'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_temp_spline(model, orig_data, var, colour_code) 
+p2 <- plot_humidity_spline(model, orig_data, var, colour_code) 
+
+p1 + ggtitle(title) + scale_y_continuous(trans = 'log10',  v)
+p2 + ggtitle('') + scale_y_continuous(trans = 'log10', limits = c(1e-7, 1))
+
+model
+```
+
+### Countor plot of tensor product
+```{r}
+plot_2D_tensor <- function(model, orig_data, var){
+    
+  n <- 200
+  
+  
+  if(var == 7){
+    temp_orig_data <- orig_data$mean_week_temperature
+    hum_orig_data <- orig_data$mean_week_humidity
+  }
+  
+  if(var == 14){
+    temp_orig_data <- orig_data$mean_2week_temperature
+    hum_orig_data <- orig_data$mean_2week_humidity
+  }
+  
+  if(var == 28){
+    temp_orig_data <- orig_data$mean_4week_temperature
+    hum_orig_data <- orig_data$mean_4week_humidity
+  }
+  
+  min_temp <- min(temp_orig_data)
+  max_temp <- max(temp_orig_data)
+  mu_temp_S <- mean(temp_orig_data)
+  sd_temp_S <- sd(temp_orig_data)
+  step <- (max_temp-min_temp)/(n-1)  
+  new_temp <- seq(min_temp, max_temp, step)
+  new_temp_S <- (new_temp - mu_temp_S)/sd_temp_S
+  
+  original_humidity <- hum_orig_data
+  logit_humidity <- logit_scaled(original_humidity/100)
+  min_hum <- min(logit_humidity)
+  max_hum <- max(logit_humidity)
+  mu_hum_S <- mean(logit_humidity)
+  sd_hum_S <- sd(logit_humidity)
+  step <- (max_hum-min_hum)/(n-1)  
+  new_hum <- seq(min_hum, max_hum, step)
+  new_hum_S <- (new_hum - mu_hum_S)/sd_hum_S
+  new_hum_nS <- inv_logit_scaled(new_hum)
+  
+  var_type <- c(rep('temp', n), rep('hum', n))
+  mat_vartype <- matrix(var_type, # hum is col
+                       nrow = n,
+                       ncol = n,
+                       byrow = T)
+  mat_vartype_vector <- as.vector(mat_vartype) # by columns
+  
+  combo_id <- paste0('combo', seq(1,n*n))
+  mat_combo_id <- matrix(combo_id, # hum is col
+                       nrow = n,
+                       ncol = n,
+                       byrow = T)
+  mat_combo_id_vector <- as.vector(mat_combo_id) # by columns
+  
+  combo_id <- paste0('combo', seq(1,n*n))
+  mat_orig <- matrix(c(new_temp, new_hum_nS), # hum is col
+                       nrow = n,
+                       ncol = n,
+                       byrow = T)
+  mat_orig_vector <- as.vector(mat_orig) # by columns
+  
+  mat_S <- matrix(c(new_temp_S, new_hum_S), # hum is col
+         nrow = n,
+         ncol = n,
+         byrow = T)
+  mat_S_vector <- as.vector(mat_S) # by columns
+  
+  
+  temphum_combos <- tibble(combo_id = mat_combo_id_vector,
+         vartype = mat_vartype_vector,
+         orig_val = mat_orig_vector,
+         s_val = mat_S_vector) %>%
+    distinct()
+  temp_only <- temphum_combos %>%
+    filter(vartype == 'temp') %>%
+    arrange(combo_id)
+  hum_only <- temphum_combos %>%
+    filter(vartype == 'hum') %>%
+    arrange(combo_id)
+  
+  n2 <- (n*n)/2
+  dummy_data <- tibble(
+    am = c(rep(0, n2), rep(1, n2)),
+    log_dilution = c(rep(log(0.1),n2), rep(0, n2)),
+    mean_week_temperature = c(temp_only$orig_val, temp_only$orig_val),
+    mean_week_temperature_S = c(temp_only$s_val, temp_only$s_val),
+    mean_week_humidity = c(hum_only$orig_val, hum_only$orig_val),
+    mean_week_humidity_S = c(hum_only$s_val, hum_only$s_val),
+    combo_id = c(hum_only$combo_id, hum_only$combo_id),
+    study_day_effect = 0.5,
+    farm = NA,
+    assay = NA,
+    location_id = NA)
+  
+  
+  if(var == 14){
+      names(dummy_data)[3:6] <- c("mean_2week_temperature", "mean_2week_temperature_S", "mean_2week_humidity", "mean_2week_humidity_S" )
+
+  }
+  
+  if(var == 28){
+      names(dummy_data)[3:6] <- c("mean_4week_temperature", "mean_4week_temperature_S", "mean_4week_humidity", "mean_4week_humidity_S" )
+  }
+  
+  estimates <- as_tibble(inv_logit_scaled(
+                                fitted(model,
+                                       newdata = dummy_data,
+                                       re_formula = NA,
+                                       nlpar = 'interaction', summary = T)))
+  
+  results <- cbind(estimates, dummy_data) 
+  names(results)[7:10] <- c("mean_temp", "mean_temp_S", "mean_humidity", "mean_humidity_S" )
+  
+  temp_seq <- seq(min(results$mean_temp), max(results$mean_temp), (max(results$mean_temp) - min(results$mean_temp))/49)
+  hum_seq <- seq(min(results$mean_humidity), max(results$mean_humidity), (max(results$mean_humidity) - min(results$mean_humidity))/49)
+  bin_cutoffs_temp <- tibble(temp_bins = seq(1,50),
+                             temp_seq)
+  bin_cutoffs_hum <- tibble(hum_bins = seq(1,50),
+                             hum_seq)
+  
+  p1 <- results %>%
+    select(Estimate, mean_temp, mean_humidity) %>%
+    mutate(temp_bins = ntile(mean_temp, n = 35),
+           hum_bins = ntile(mean_humidity, n = 35)) %>%
+    left_join(bin_cutoffs_temp, by = c('temp_bins')) %>%
+    left_join(bin_cutoffs_hum, by = c('hum_bins')) %>%
+    mutate(hum_seq = hum_seq*100) %>%
+    group_by(temp_seq, hum_seq) %>%
+    summarise(av_estimate = mean(Estimate),
+              `Proportion res (1x10^)` = log10(av_estimate)) %>%
+    ungroup() %>%
+    distinct() %>%
+    ggplot() +
+    geom_tile(aes(x = temp_seq, y = hum_seq, fill = `Proportion res (1x10^)`, colour = `Proportion res (1x10^)`)) +
+    geom_contour(aes(x = temp_seq, y = hum_seq, z = `Proportion res (1x10^)`), colour = 'black', alpha = 0.3)+
+    scale_fill_continuous(type = 'viridis') +
+    scale_colour_continuous(type = 'viridis') +
+    theme_minimal() +
+    ylab('Mean relative humidity (%)\n 28 days') +
+    xlab('Mean air temperature (celcius)\n 28 days')
+  
+  return(p1)
+}
+
+```
+
+
+```{r, fig.width = 5, fig.height=3}
+am <- 'amox'
+location <- 'yard'
+colour_code <- '#0CC6DE'
+var <- 28
+title <- 'Amoxicillin: Adults in collecting yards'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_2D_tensor(model, orig_data, var)
+
+p1 + ggtitle(title)
+
+p1
+```
+
+```{r, fig.width = 5, fig.height=3}
+am <- 'amox'
+location <- 'shed'
+colour_code <- '#0CC6DE'
+var <- 28
+title <- 'Amoxicillin: Heifers in sheds/pens'
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_2D_tensor(model, orig_data, var)
+
+p1 + ggtitle(title)
+
+p1
+```
+
+
+```{r, fig.width = 5, fig.height=3}
+am <- 'ceph'
+location <- 'yard'
+colour_code <- '#34B233'
+var <- 14
+title <- 'Cephalexin: Adults in collecting yards'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_2D_tensor(model, orig_data, var)
+
+p1 + ggtitle(title)
+```
+
+```{r, fig.width = 5, fig.height=3}
+am <- 'ceph'
+location <- 'shed'
+colour_code <- '#34B233'
+var <- 7
+title <- 'Cephalexin: Heifers in sheds/pens'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_2D_tensor(model, orig_data, var)
+
+p1 + ggtitle(title)
+```
+
+
+```{r, fig.width = 5, fig.height=3}
+am <- 'strep'
+location <- 'yard'
+colour_code <- '#002F5F'
+var <- 14
+title <- 'Streptomycin: Adults in collecting yards'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_2D_tensor(model, orig_data, var)
+
+p1 + ggtitle(title)
+```
+
+```{r, fig.width = 5, fig.height=3}
+am <- 'strep'
+location <- 'shed'
+colour_code <- '#002F5F'
+var <- 14
+title <- 'Streptomycin: Heifers in sheds/pens'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_2D_tensor(model, orig_data, var)
+
+p1 + ggtitle(title)
+```
+
+```{r, fig.width = 5, fig.height=3}
+am <- 'tetra'
+location <- 'yard'
+colour_code <- '#9672b5'
+var <- 28
+title <- 'Tetracycline: Adults in collecting yards'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_2D_tensor(model, orig_data, var)
+
+p1 + ggtitle(title)
+```
+
+```{r, fig.width = 5, fig.height=3}
+am <- 'tetra'
+location <- 'shed'
+colour_code <- '#9672b5'
+var <- 28
+title <- 'Tetracycline: Heifers in sheds/pens'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_2D_tensor(model, orig_data, var)
+
+p1 + ggtitle(title)
+```
+
+
+```{r}
+plot_study_day_spline <- function(model, orig_data, no_bac, colour_code){
+  n <- dim(model$data)[1]/2
+  day_of_study_var <- seq(0,1, (1/(n-1)))
+  
+  new_data <- model$data %>%
+    mutate(x_val = rep(paste0('V', as.character(seq(1,n))), 2),
+           assay = NA, farm = NA, location_id = NA,
+           mean_week_temperature_S = 0,
+           mean_week_humidity_S = 0,
+           mean_2week_temperature_S = 0,
+           mean_2week_humidity_S = 0,
+           mean_4week_temperature_S = 0,
+           mean_4week_humidity_S = 0,
+           day_of_study = rep(day_of_study_var, day_of_study_var))
+           
+  estimates_season <- as_tibble(inv_logit_scaled(
+                                fitted(model,
+                                       newdata = new_data,
+                                       re_formula = NA,
+                                       nlpar = 'interaction',
+                                       summary = T)))
+  
+  assays <- as_tibble(inv_logit_scaled(fitted(model,
+                      re_formula = NULL,
+                      nlpar = 'interaction'))) %>%
+    distinct()
+  
+  names(assays) <- paste0('assay_', names(assays))
+  
+  res <- cbind(estimates_season, model$data) %>%
+    filter(am == 0)
+  assays <- cbind(assays, model$data) %>%
+    filter(am == 0)
+  
+  final_res <- res %>%
+    left_join(orig_data, by = 'assay') %>%
+    left_join(assays, by = 'assay') %>%
+    distinct()
+  
+  spline_plot <- final_res %>%
+    ggplot() +
+    geom_point(data = no_bac, aes(y = 3e-7, x = date), alpha = 0.5, colour = 'red', shape = 18, size = 2.5) +
+    geom_point(aes(y = assay_Estimate, x = date), alpha = 0.3, colour = 'grey') +
+    geom_line(aes(x = date, y = Estimate), colour = colour_code) +
+    geom_ribbon(aes(x =  date, ymin = Q2.5, ymax = Q97.5), alpha = 0.5, fill = colour_code) +
+    scale_y_continuous(trans = 'log10', limits = c(1e-7, 1)) +
+    xlab('Date') +
+    ylab('Estimated proportion resistant') +
+    theme_minimal()
+  
+  return(spline_plot)
+  
+}
+
+```
+
+### Making plots of study day effect
+```{r, fig.width = 6, fig.height=4}
+no_bac_yard <- readRDS(paste0(datapath, 'df1_no_bac_yard.Rds'))
+no_bac_shed <- readRDS(paste0(datapath, 'df1_no_bac_shed.Rds'))
+
+am <- 'amox'
+location <- 'yard'
+colour_code <- '#0CC6DE'
+var <- 28
+title <- 'Amoxicillin: Adults in collecting yards'
+no_bac <- no_bac_yard
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_study_day_spline(model, orig_data, no_bac, colour_code)
+
+p1 + ggtitle(title)
+```
+
+```{r, fig.width = 6, fig.height=4}
+am <- 'amox'
+location <- 'shed'
+colour_code <- '#0CC6DE'
+var <- 28
+title <- 'Amoxicillin: Heifers in sheds/pens'
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_study_day_spline(model, orig_data, no_bac, colour_code)
+
+p1 + ggtitle(title)
+```
+
+
+```{r, fig.width = 6, fig.height=4}
+am <- 'ceph'
+location <- 'yard'
+colour_code <- '#34B233'
+var <- 14
+title <- 'Cephalexin: Adults in collecting yards'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_study_day_spline(model, orig_data, no_bac, colour_code)
+
+p1 + ggtitle(title)
+```
+
+```{r, fig.width = 6, fig.height=4}
+am <- 'ceph'
+location <- 'shed'
+colour_code <- '#34B233'
+var <- 7
+title <- 'Cephalexin: Heifers in sheds/pens'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_study_day_spline(model, orig_data, no_bac, colour_code)
+
+p1 + ggtitle(title)
+```
+
+
+```{r, fig.width = 6, fig.height=4}
+am <- 'strep'
+location <- 'yard'
+colour_code <- '#002F5F'
+var <- 14
+title <- 'Streptomycin: Adults in collecting yards'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_study_day_spline(model, orig_data, no_bac, colour_code)
+
+p1 + ggtitle(title)
+```
+
+```{r, fig.width = 6, fig.height=4}
+am <- 'strep'
+location <- 'shed'
+colour_code <- '#002F5F'
+var <- 14
+title <- 'Streptomycin: Heifers in sheds/pens'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_study_day_spline(model, orig_data, no_bac_shed, colour_code)
+
+p1 + ggtitle(title)
+```
+
+```{r, fig.width = 6, fig.height=4}
+am <- 'tetra'
+location <- 'yard'
+colour_code <- '#9672b5'
+var <- 28
+title <- 'Tetracycline: Adults in collecting yards'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_study_day_spline(model, orig_data, no_bac, colour_code)
+
+p1 + ggtitle(title)
+```
+
+```{r, fig.width = 6, fig.height=4}
+am <- 'tetra'
+location <- 'shed'
+colour_code <- '#9672b5'
+var <- 28
+title <- 'Tetracycline: Heifers in sheds/pens'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+p1 <- plot_study_day_spline(model, orig_data, no_bac, colour_code)
+
+p1 + ggtitle(title)
+```
+
+
+```{r}
+results_tab_point_ests <- function(model, orig_data, model_name){
+  n <- 4
+  
+  
+  if(var == 7){
+    temp_orig_data <- orig_data$mean_week_temperature
+    hum_orig_data <- orig_data$mean_week_humidity
+  }
+  
+  if(var == 14){
+    temp_orig_data <- orig_data$mean_2week_temperature
+    hum_orig_data <- orig_data$mean_2week_humidity
+  }
+  
+  if(var == 28){
+    temp_orig_data <- orig_data$mean_4week_temperature
+    hum_orig_data <- orig_data$mean_4week_humidity
+  }
+  
+  mu_temp_S <- mean(temp_orig_data)
+  sd_temp_S <- sd(temp_orig_data)
+  new_temp <- c(5, 10, 15, 20)
+  new_temp_S <- (new_temp - mu_temp_S)/sd_temp_S
+  
+  original_humidity <- hum_orig_data
+  logit_humidity <- logit_scaled(original_humidity/100)
+  min_hum <- min(logit_humidity)
+  max_hum <- max(logit_humidity)
+  mu_hum_S <- mean(logit_humidity)
+  sd_hum_S <- sd(logit_humidity)
+  new_hum <- logit_scaled(c(0.6, 0.7, 0.8, 0.9))
+  new_hum_S <- (new_hum - mu_hum_S)/sd_hum_S
+  new_hum_nS <- inv_logit_scaled(new_hum)
+  
+  
+  
+  hum_S <- rep(new_hum_S, n)
+  temp_S <- sort(rep(new_temp_S, n))
+  hum_nS <- rep(new_hum_nS, n)
+  temp_nS <- sort(rep(new_temp, n))
+  
+  n2 <- (n*n)
+  dummy_data <- tibble(
+    am = c(rep(0, n2), rep(1, n2)),
+    log_dilution = c(rep(log(0.1),n2), rep(0, n2)),
+    mean_week_temperature = c(rep(temp_nS, 2)),
+    mean_week_temperature_S = c(rep(temp_S, 2)),
+    mean_week_humidity = c(rep(hum_nS, 2)),
+    mean_week_humidity_S = c(rep(hum_S, 2)),
+    combo_id = c(seq(1,16), seq(1,16)),
+    study_day_effect = 0.5,
+    farm = NA,
+    assay = NA,
+    location_id = NA)
+  
+  
+  if(var == 14){
+      names(dummy_data)[3:6] <- c("mean_2week_temperature", "mean_2week_temperature_S", "mean_2week_humidity", "mean_2week_humidity_S" )
+
+  }
+  
+  if(var == 28){
+      names(dummy_data)[3:6] <- c("mean_4week_temperature", "mean_4week_temperature_S", "mean_4week_humidity", "mean_4week_humidity_S" )
+  }
+  
+  estimates <- as_tibble(inv_logit_scaled(
+                                fitted(model,
+                                       newdata = dummy_data,
+                                       re_formula = NA,
+                                       nlpar = 'interaction', summary = T)))
+  
+  results <- cbind(estimates, dummy_data) 
+  names(results)[7:10] <- c("mean_temp", "mean_temp_S", "mean_humidity", "mean_humidity_S" )
+  
+#mean_res <- mean(inv_logit_scaled((model %>%
+ # spread_draws(b_interaction_Intercept))$b_interaction_Intercept))
+
+results_tab <- results %>%
+    select(Estimate, Q2.5, Q97.5, mean_temp, mean_humidity) %>%
+    distinct() %>%
+    mutate(mean_humidity = mean_humidity *100) %>%
+    arrange(mean_temp, mean_humidity) %>%
+    mutate(est_ci = paste0(Estimate)) %>%
+  select(mean_temp, mean_humidity, est_ci) %>%
+  spread(key = 'mean_temp', value = 'est_ci') %>%
+  mutate(model_name = model_name) %>%
+         #mean_res = mean_res) %>%
+  #select(model_name, mean_res, everything())
+  select(model_name, everything())
+
+return(results_tab)
+}
+
+
+
+results_tab_withCIs <- function(model, orig_data, model_name){
+  n <- 4
+  
+  
+  if(var == 7){
+    temp_orig_data <- orig_data$mean_week_temperature
+    hum_orig_data <- orig_data$mean_week_humidity
+  }
+  
+  if(var == 14){
+    temp_orig_data <- orig_data$mean_2week_temperature
+    hum_orig_data <- orig_data$mean_2week_humidity
+  }
+  
+  if(var == 28){
+    temp_orig_data <- orig_data$mean_4week_temperature
+    hum_orig_data <- orig_data$mean_4week_humidity
+  }
+  
+  mu_temp_S <- mean(temp_orig_data)
+  sd_temp_S <- sd(temp_orig_data)
+  new_temp <- c(5, 10, 15, 20)
+  new_temp_S <- (new_temp - mu_temp_S)/sd_temp_S
+  
+  original_humidity <- hum_orig_data
+  logit_humidity <- logit_scaled(original_humidity/100)
+  min_hum <- min(logit_humidity)
+  max_hum <- max(logit_humidity)
+  mu_hum_S <- mean(logit_humidity)
+  sd_hum_S <- sd(logit_humidity)
+  new_hum <- logit_scaled(c(0.6, 0.7, 0.8, 0.9))
+  new_hum_S <- (new_hum - mu_hum_S)/sd_hum_S
+  new_hum_nS <- inv_logit_scaled(new_hum)
+  
+  
+  
+  hum_S <- rep(new_hum_S, n)
+  temp_S <- sort(rep(new_temp_S, n))
+  hum_nS <- rep(new_hum_nS, n)
+  temp_nS <- sort(rep(new_temp, n))
+  
+  n2 <- (n*n)
+  dummy_data <- tibble(
+    am = c(rep(0, n2), rep(1, n2)),
+    log_dilution = c(rep(log(0.1),n2), rep(0, n2)),
+    mean_week_temperature = c(rep(temp_nS, 2)),
+    mean_week_temperature_S = c(rep(temp_S, 2)),
+    mean_week_humidity = c(rep(hum_nS, 2)),
+    mean_week_humidity_S = c(rep(hum_S, 2)),
+    combo_id = c(seq(1,16), seq(1,16)),
+    study_day_effect = 0.5,
+    farm = NA,
+    assay = NA,
+    location_id = NA)
+  
+  
+  if(var == 14){
+      names(dummy_data)[3:6] <- c("mean_2week_temperature", "mean_2week_temperature_S", "mean_2week_humidity", "mean_2week_humidity_S" )
+
+  }
+  
+  if(var == 28){
+      names(dummy_data)[3:6] <- c("mean_4week_temperature", "mean_4week_temperature_S", "mean_4week_humidity", "mean_4week_humidity_S" )
+  }
+  
+  estimates <- as_tibble(inv_logit_scaled(
+                                fitted(model,
+                                       newdata = dummy_data,
+                                       re_formula = NA,
+                                       nlpar = 'interaction', summary = T)))
+  
+  results <- cbind(estimates, dummy_data) 
+  names(results)[7:10] <- c("mean_temp", "mean_temp_S", "mean_humidity", "mean_humidity_S" )
+  
+#mean_res <- mean(inv_logit_scaled((model %>%
+ # spread_draws(b_interaction_Intercept))$b_interaction_Intercept))
+
+results_tab <- results %>%
+    select(Estimate, Q2.5, Q97.5, mean_temp, mean_humidity) %>%
+    distinct() %>%
+    mutate(mean_humidity = mean_humidity *100,
+           est_round = as.character(round(Estimate*100, 3)),
+           low_round = as.character(round(Q2.5*100, 3)),
+           upp_round = as.character(round(Q97.5*100, 3))) %>%
+    arrange(mean_temp, mean_humidity) %>%
+    mutate(est_ci = paste0(est_round, ' (', low_round, ' - ', upp_round, ')')) %>%
+  select(mean_temp, mean_humidity, est_ci) %>%
+  spread(key = 'mean_temp', value = 'est_ci') %>%
+  mutate(model_name = model_name) %>%
+         #mean_res = mean_res) %>%
+  #select(model_name, mean_res, everything())
+  select(model_name, everything())
+
+return(results_tab)
+}
+```
+
+
+```{r, fig.width = 6, fig.height=4}
+am <- 'amox'
+location <- 'yard'
+colour_code <- '#0CC6DE'
+var <- 28
+title <- 'Amoxicillin: Adults in collecting yards'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+t1 <- results_tab_withCIs(model, orig_data, title)
+
+t1
+```
+
+```{r, fig.width = 6, fig.height=4}
+am <- 'amox'
+location <- 'shed'
+colour_code <- '#0CC6DE'
+var <- 28
+title <- 'Amoxicillin: Heifers in sheds/pens'
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+t2 <- results_tab_withCIs(model, orig_data, title)
+
+```
+
+
+```{r, fig.width = 6, fig.height=4}
+am <- 'ceph'
+location <- 'yard'
+colour_code <- '#34B233'
+var <- 14
+title <- 'Cephalexin: Adults in collecting yards'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+t3 <- results_tab_withCIs(model, orig_data, title)
+
+```
+
+```{r, fig.width = 6, fig.height=4}
+am <- 'ceph'
+location <- 'shed'
+colour_code <- '#34B233'
+var <- 7
+title <- 'Cephalexin: Heifers in sheds/pens'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+t4 <- results_tab_withCIs(model, orig_data, title)
+
+```
+
+
+```{r, fig.width = 6, fig.height=4}
+am <- 'strep'
+location <- 'yard'
+colour_code <- '#002F5F'
+var <- 14
+title <- 'Streptomycin: Adults in collecting yards'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+t5 <- results_tab_withCIs(model, orig_data, title)
+
+```
+
+```{r, fig.width = 6, fig.height=4}
+am <- 'strep'
+location <- 'shed'
+colour_code <- '#002F5F'
+var <- 14
+title <- 'Streptomycin: Heifers in sheds/pens'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+t6 <- results_tab_withCIs(model, orig_data, title)
+
+```
+
+```{r, fig.width = 6, fig.height=4}
+am <- 'tetra'
+location <- 'yard'
+colour_code <- '#9672b5'
+var <- 28
+title <- 'Tetracycline: Adults in collecting yards'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+
+t7 <- results_tab_withCIs(model, orig_data, title)
+
+```
+
+```{r, fig.width = 6, fig.height=4}
+am <- 'tetra'
+location <- 'shed'
+colour_code <- '#9672b5'
+var <- 28
+title <- 'Tetracycline: Heifers in sheds/pens'
+
+model <- readRDS(paste0(savepath, 'tensor_D1_', am, '_', location, '.Rds'))
+orig_data <- readRDS(paste0(datapath, 'df1_', location, '_', am, '_brms.Rds'))  
+
+t8 <- results_tab_withCIs(model, orig_data, title)
+
+```
+
+```{r}
+point_ests_table <- rbind(t1, t2, t3, t4, t5, t6, t7, t8)
+point_ests_table
+
+write.csv(point_ests_table, paste0(savepath, 'point_ests_table_wtihCI.csv'))
+```
+
+```{r}
+joined_weather_data_locations_lag <- readRDS(paste0(datapath, 'lagged_weather_by_location.Rds'))  
+joined_weather_data_locations_lag
+
+res_at_mean_weather <- function(model, var){
+    
+    dummy_data <- tibble(
+      am = c(0,1),
+      log_dilution = c(log(0.1), 0),
+      mean_week_temperature_S = c(0, 0),
+      mean_week_humidity_S = c(0, 0),
+      study_day_effect = 0.5,
+      farm = NA,
+      assay = NA,
+      location_id = NA)
+    
+    if(var == 14){
+        names(dummy_data)[3:4] <- c("mean_2week_temperature_S", "mean_2week_humidity_S" )
+  
+    }
+    
+    if(var == 28){
+        names(dummy_data)[3:4] <- c("mean_4week_temperature_S", "mean_4week_humidity_S" )
+    }
+    
+    estimates <- as_tibble(inv_logit_scaled(
+                                  fitted(model,
+                                         newdata = dummy_data,
+                                         re_formula = NA,
+                                         nlpar = 'interaction', summary = T)))
+    
+  mu_res_at_mu_temp <- mean(estimates$Estimate)
+  
+  
+  return(mu_res_at_mu_temp)
+}
+
+
+res_at_mean_weather(readRDS(paste0(savepath, 'tensor_D1_', 'amox', '_', 'yard', '.Rds')),
+                        var = 28)
+res_at_mean_weather(readRDS(paste0(savepath, 'tensor_D1_', 'amox', '_', 'shed', '.Rds')),
+                          var = 28)
+res_at_mean_weather(readRDS(paste0(savepath, 'tensor_D1_', 'ceph', '_', 'yard', '.Rds')),
+                          var = 14)
+res_at_mean_weather(readRDS(paste0(savepath, 'tensor_D1_', 'ceph', '_', 'shed', '.Rds')),
+                          var = 7)
+res_at_mean_weather(readRDS(paste0(savepath, 'tensor_D1_', 'strep', '_', 'yard', '.Rds')),
+                          var = 14)
+res_at_mean_weather(readRDS(paste0(savepath, 'tensor_D1_', 'strep', '_', 'shed', '.Rds')),
+                          var = 14)
+res_at_mean_weather(readRDS(paste0(savepath, 'tensor_D1_', 'tetra', '_', 'yard', '.Rds')),
+                          var = 28)
+res_at_mean_weather(readRDS(paste0(savepath, 'tensor_D1_', 'tetra', '_', 'shed', '.Rds')),
+                          var = 28)
+
+mean(orig_data$mean_week_humidity)
+mean(orig_data$mean_2week_humidity)
+mean(orig_data$mean_4week_humidity)
+
+mean(orig_data$mean_week_temperature)
+mean(orig_data$mean_2week_temperature)
+mean(orig_data$mean_4week_temperature)
+
+```
+
+```{r}
+calc_wiggles <- function(model, am, location){
+  
+  res <- model  %>%
+    spread_draws(`sds.*`, regex = T) %>%
+    mutate(model = as.factor(am),
+           location = as.factor(location)) %>%
+    select(-.chain, -.iteration, -.draw)
+  
+  names(res) <- c('temp', 'hum', 'int', 'day_of_study', 'model', 'location')
+  
+  return(res)
+}
+
+r1 <- calc_wiggles(readRDS(paste0(savepath, 'tensor_D1_', 'amox', '_', 'yard', '.Rds')), 'Amoxicillin', 'yard')
+r2 <- calc_wiggles(readRDS(paste0(savepath, 'tensor_D1_', 'amox', '_', 'shed', '.Rds')), 'Amoxicillin', 'shed')
+r3 <- calc_wiggles(readRDS(paste0(savepath, 'tensor_D1_', 'ceph', '_', 'yard', '.Rds')), 'Cephalexin', 'yard')
+r4 <- calc_wiggles(readRDS(paste0(savepath, 'tensor_D1_', 'ceph', '_', 'shed', '.Rds')), 'Cephalexin', 'shed')
+r5 <- calc_wiggles(readRDS(paste0(savepath, 'tensor_D1_', 'strep', '_', 'yard', '.Rds')), 'Streptomycin', 'yard')
+r6 <- calc_wiggles(readRDS(paste0(savepath, 'tensor_D1_', 'strep', '_', 'shed', '.Rds')),'Streptomycin', 'shed')
+r7 <- calc_wiggles(readRDS(paste0(savepath, 'tensor_D1_', 'tetra', '_', 'yard', '.Rds')),'Tetracycline', 'yard')
+r8 <- calc_wiggles(readRDS(paste0(savepath, 'tensor_D1_', 'tetra', '_', 'shed', '.Rds')),'Tetracycline', 'shed')
+
+all_ams_sds_smooths <- rbind(r1, r2, r3, r4, r5, r6, r7, r8)
+all_ams_sds_smooths
+levels(all_ams_sds_smooths$location) <- c('Adults in collecting yard', 'Heifers in sheds/pens')
+
+median_and_CIs <- function(data){
+  med <- as.character(round(median(data), 1))
+  upp <- as.character(round(quantile(data, 0.975),1))
+  low <- as.character(round(quantile(data, 0.025), 1))
+  sig <- ' '
+  if((upp > 0 & low > 0) | (upp < 0 & low < 0) ){
+    sig <- '*'
+  }
+  
+  return(paste0(med, ' (', low, ', ', upp, ')  ', sig))
+}
+
+res_table_sds_smooths <- all_ams_sds_smooths %>%
+  group_by(model, location) %>%
+  summarise(temp_sds = median_and_CIs(temp),
+            humidity_sds = median_and_CIs(hum),
+            interaction_sds = median_and_CIs(int))
+
+res_table_sds_smooths
+
+write.csv(res_table_sds_smooths, paste0(savepath, 'res_table_sds_smooths.csv'))
+
+```
+
+

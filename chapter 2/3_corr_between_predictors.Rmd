@@ -1,0 +1,310 @@
+---
+title: "Investigating correlations between predictors"
+output: html_notebook
+---
+
+Investigating correlations between predictors 
+
+saveRDS(synergy_RF, paste0(path, 'synergy_RF.Rds'))
+### Load libraries and path
+```{r}
+library(tidyverse)
+library(lubridate)
+
+path <- "/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/synergy/data/"
+save_path <- "/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/synergy/results/"
+
+```
+
+```{r}
+synergy_RF <- readRDS(paste0(path, 'synergy_RF.Rds'))
+synergy_RF <- readRDS(paste0(path, 'synergy_RF_unscaled.Rds'))
+
+sum((synergy_RF %>%
+  filter(year == '2018') %>%
+  group_by(premises_id) %>%
+  summarise(mu = mean(herd_size)))$mu)
+
+mean((synergy_RF %>%
+  filter(year == '2018'))$total_mgkg_esvac)
+
+synergy_RF %>%
+  filter(year == '2018') %>%
+  mutate(quint = ntile(total_mgkg_esvac, 5)) %>%
+  group_by(quint) %>%
+  summarise(mean(total_mgkg_esvac)) 
+
+3.724949 + 5.889711	+ 8.552491 + 11.722467	+23.029934
+
+23.029934
+
+23.029934/ 52.91955
+
+29.88962
+
+mean((synergy_RF %>%
+  filter(year == '2018'))$total_mgkg_esvac)
+  
+synergy_RF %>%
+  filter(year == '2018') %>%
+  group_by(quint) %>%
+  summarise(mean(total_mgkg_esvac)) 
+  
+54 /105
+
+
+10.58391/19.09511
+```
+
+### custom_corrplot function
+```{r, fig.width = 8, fig.height = 8}
+custom_corrplot <- function(df, string_select){
+  library(corrplot)
+  if(string_select != ''){
+  cor_matrix <- df %>%
+    select(contains(string_select) )
+  
+  names(cor_matrix) <- gsub(string_select, '', names(cor_matrix))
+  }
+  
+  cor_res <- cor(cor_matrix, method = 'spearman')
+  
+  coef_table_corrs <- as_tibble(cor_res) %>%
+    mutate(var = names(as_tibble(cor_res))) %>%
+    gather(key = 'var2', value = 'corr_coef', -var) %>%
+    filter(!var == var2) 
+  cor_res <- replace(cor_res, is.na(cor_res), 0)
+  corrplot(cor_res,
+         method = 'ellipse', order = 'original', type = 'lower',
+         tl.cex = 0.75,
+         mar=c(0,0,1,0)) 
+  
+  return(coef_table_corrs)
+}
+
+corr_tb <- custom_corrplot(synergy_RF, '_S')
+custom_corrplot(synergy_RF, '_S')
+corr_tb %>%
+  mutate(corr_coef = round(corr_coef, 2)) %>%
+  filter(var == 'n_visits')
+```
+
+### Differences in calving pattern
+```{r}
+kruskal.test(mu_SCC_ml_S ~ calving_pattern_F, synergy_RF) 
+kruskal.test(mu_parity_S ~ calving_pattern_F, synergy_RF) # sig dif
+kruskal.test(total_prod_per_cow_S ~ calving_pattern_F, synergy_RF) # sig dif
+kruskal.test(herd_size_S ~ calving_pattern_F, synergy_RF) 
+kruskal.test(n_visits_S ~ calving_pattern_F, synergy_RF) # sig dif
+kruskal.test(prop_herd_DCT_T_S ~ calving_pattern_F, synergy_RF)
+```
+
+```{r}
+predictors <- readRDS(paste0(path, 'all_predictors_T_S_F.Rds')) 
+unscaled_predictors <- predictors %>%
+    select(premises_year, everything(), -ends_with('_F'), -ends_with('_S'), -ends_with('_T')) 
+
+
+unscaled_predictors %>%
+  ggplot() +
+  geom_boxplot(aes(x = as.factor(calving_pattern), y = mu_parity, colour = as.factor(calving_pattern)), outlier.shape = NA) +
+  geom_point(aes(x = as.factor(calving_pattern), y = mu_parity, colour = as.factor(calving_pattern)), alpha = 0.2, position = 'jitter') +
+  scale_colour_manual(values = c(dual_blues[2], dual_greens[2], dual_blues[1])) +
+  theme_minimal()
+
+unscaled_predictors %>%
+  filter(total_prod_per_cow < quantile(total_prod_per_cow, 0.975, na.rm = T)) %>%
+  filter(total_prod_per_cow > quantile(total_prod_per_cow, 0.025, na.rm = T)) %>%
+  ggplot() +
+  geom_boxplot(aes(x = as.factor(calving_pattern), y = total_prod_per_cow, colour = as.factor(calving_pattern)), outlier.shape = NA) +
+  geom_point(aes(x = as.factor(calving_pattern), y = total_prod_per_cow, colour = as.factor(calving_pattern)), alpha = 0.2, position = 'jitter') +
+  scale_colour_manual(values = c(dual_blues[2], dual_greens[2], dual_blues[1])) +
+  theme_minimal()
+
+unscaled_predictors %>%
+  ggplot() +
+  geom_boxplot(aes(x = as.factor(calving_pattern), y = n_visits, colour = as.factor(calving_pattern)), outlier.shape = NA) +
+  geom_point(aes(x = as.factor(calving_pattern), y = n_visits, colour = as.factor(calving_pattern)), alpha = 0.2, position = 'jitter') +
+  scale_colour_manual(values = c(dual_blues[2], dual_greens[2], dual_blues[1])) +
+  theme_minimal()
+
+
+
+low_calve <- unscaled_predictors %>%
+  group_by(calving_pattern) %>%
+  summarise_if(is.numeric, ~quantile(., 0.25, na.rm = TRUE)) %>%
+  gather(key = 'predictor', value = 'low', -calving_pattern)
+
+med_calve <- unscaled_predictors %>%
+  group_by(calving_pattern) %>%
+  summarise_if(is.numeric, ~quantile(., 0.5, na.rm = TRUE))%>%
+  gather(key = 'predictor', value = 'med', -calving_pattern)
+
+upp_calve <- unscaled_predictors %>%
+  group_by(calving_pattern) %>%
+  summarise_if(is.numeric, ~quantile(., 0.75, na.rm = TRUE))%>%
+  gather(key = 'predictor', value = 'upp', -calving_pattern)
+
+
+complete_calving_summary_stats <- low_calve %>%
+  left_join(med_calve, by = c('predictor','calving_pattern')) %>%
+  left_join(upp_calve, by = c('predictor','calving_pattern')) %>%
+  distinct() 
+
+complete_calving_summary_stats
+
+complete_calving_summary_stats <- complete_calving_summary_stats %>%
+  mutate_if(is.numeric, ~round(., 1)) %>%
+  mutate(all_stats = paste0(mean, ', ', med, ' (', low, ' - ', upp, ')')) %>%
+  select(calving_pattern, predictor, all_stats) %>%
+  spread(key = 'calving_pattern', value = 'all_stats')
+  
+write.csv(complete_calving_summary_stats_median, paste0(save_path, 'complete_organic_summary_stats_median.csv'))
+
+complete_calving_summary_stats_median
+```
+
+### Differences in organic farms
+```{r}
+kruskal.test(mu_SCC_ml_S ~ organic_F, synergy_RF) 
+kruskal.test(mu_parity_S ~ organic_F, synergy_RF) 
+kruskal.test(total_prod_per_cow_S ~ organic_F, synergy_RF) 
+kruskal.test(herd_size_S ~ organic_F, synergy_RF) 
+kruskal.test(n_visits_S ~ organic_F, synergy_RF) 
+kruskal.test(prop_herd_DCT_T_S ~ organic_F, synergy_RF) 
+
+# sig difs in all
+
+
+unscaled_predictors %>%
+  filter(!is.na(organic)) %>%
+  filter(mu_SCC_ml < quantile(mu_SCC_ml, 0.975, na.rm = T)) %>%
+  filter(mu_SCC_ml > quantile(mu_SCC_ml, 0.025, na.rm = T)) %>%
+  ggplot() +
+  geom_boxplot(aes(x = as.factor(organic), y = mu_SCC_ml, colour = as.factor(organic)), outlier.shape = NA) +
+  geom_point(aes(x = as.factor(organic), y = mu_SCC_ml, colour = as.factor(organic)), alpha = 0.2, position = 'jitter') +
+  scale_colour_manual(values = c(dual_blues[2], dual_greens[2])) +
+  theme_minimal()
+
+
+unscaled_predictors %>%
+  filter(!is.na(organic)) %>%
+  ggplot() +
+  geom_boxplot(aes(x = as.factor(organic), y = mu_parity, colour = as.factor(organic)), outlier.shape = NA) +
+  geom_point(aes(x = as.factor(organic), y = mu_parity, colour = as.factor(organic)), alpha = 0.2, position = 'jitter') +
+  scale_colour_manual(values = c(dual_blues[2], dual_greens[2])) +
+  theme_minimal()
+
+unscaled_predictors %>%
+  filter(!is.na(organic)) %>%
+  filter(total_prod_per_cow < quantile(total_prod_per_cow, 0.975, na.rm = T)) %>%
+  filter(total_prod_per_cow > quantile(total_prod_per_cow, 0.025, na.rm = T)) %>%
+  ggplot() +
+  geom_boxplot(aes(x = as.factor(organic), y = total_prod_per_cow, colour = as.factor(organic)), outlier.shape = NA) +
+  geom_point(aes(x = as.factor(organic), y = total_prod_per_cow, colour = as.factor(organic)), alpha = 0.2, position = 'jitter') +
+  scale_colour_manual(values = c(dual_blues[2], dual_greens[2])) +
+  theme_minimal()
+
+unscaled_predictors %>%
+  filter(!is.na(organic)) %>%
+  ggplot() +
+  geom_boxplot(aes(x = as.factor(organic), y = herd_size, colour = as.factor(organic)), outlier.shape = NA) +
+  geom_point(aes(x = as.factor(organic), y = herd_size, colour = as.factor(organic)), alpha = 0.2, position = 'jitter') +
+  scale_colour_manual(values = c(dual_blues[2], dual_greens[2])) +
+  theme_minimal() +
+  scale_y_continuous(trans = 'log10')
+
+unscaled_predictors %>%
+  filter(!is.na(organic)) %>%
+  ggplot() +
+  geom_boxplot(aes(x = as.factor(organic), y = n_visits, colour = as.factor(organic)), outlier.shape = NA) +
+  geom_point(aes(x = as.factor(organic), y = n_visits, colour = as.factor(organic)), alpha = 0.2, position = 'jitter') +
+  scale_colour_manual(values = c(dual_blues[2], dual_greens[2])) +
+  theme_minimal()
+
+unscaled_predictors %>%
+  filter(!is.na(organic)) %>%
+  ggplot() +
+  geom_boxplot(aes(x = as.factor(organic), y = prop_herd_DCT, colour = as.factor(organic)), outlier.shape = NA) +
+  geom_point(aes(x = as.factor(organic), y = prop_herd_DCT, colour = as.factor(organic)), alpha = 0.2, position = 'jitter') +
+  scale_colour_manual(values = c(dual_blues[2], dual_greens[2])) +
+  theme_minimal()
+
+predictors <- readRDS(paste0(path, 'all_predictors_T_S_F.Rds')) 
+unscaled_predictors <- predictors %>%
+    select(premises_year, everything(), -ends_with('_F'), -ends_with('_S'), -ends_with('_T')) 
+
+mu_org <- unscaled_predictors %>%
+  group_by(organic) %>%
+  summarise_if(is.numeric, mean, na.rm = TRUE)%>%
+  gather(key = 'predictor', value = 'mean', -organic)
+
+low_org <- unscaled_predictors %>%
+  group_by(organic) %>%
+  summarise_if(is.numeric, ~quantile(., 0.25, na.rm = TRUE)) %>%
+  gather(key = 'predictor', value = 'low', -organic)
+
+med_org <- unscaled_predictors %>%
+  group_by(organic) %>%
+  summarise_if(is.numeric, ~quantile(., 0.5, na.rm = TRUE))%>%
+  gather(key = 'predictor', value = 'med', -organic)
+
+upp_org <- unscaled_predictors %>%
+  group_by(organic) %>%
+  summarise_if(is.numeric, ~quantile(., 0.75, na.rm = TRUE))%>%
+  gather(key = 'predictor', value = 'upp', -organic)
+
+complete_organic_summary_stats <- mu_org %>%
+  left_join(low_org, by = c('predictor','organic')) %>%
+  left_join(med_org, by = c('predictor','organic')) %>%
+  left_join(upp_org, by = c('predictor','organic')) %>%
+  distinct() %>%
+  filter(!is.na(organic))
+
+complete_organic_summary_stats_mean <- complete_organic_summary_stats %>%
+  select(organic, predictor, mean) %>%
+  spread(key = 'organic', value = 'mean')
+
+complete_organic_summary_stats_median <- complete_organic_summary_stats %>%
+  select(organic, predictor, all_stats) %>%
+  spread(key = 'organic', value = 'all_stats')
+  
+write.csv(complete_organic_summary_stats_mean, paste0(save_path, 'complete_organic_summary_stats_mean.csv'))
+write.csv(complete_organic_summary_stats_median, paste0(save_path, 'complete_organic_summary_stats_median.csv'))
+
+predictors %>%
+  count(premises_id, organic) %>%
+  count(organic)
+
+#1074 conventional, 17 organic, 3 unknown (assumed conventional)
+
+
+complete_organic_summary_stats
+```
+
+
+```{r}
+unscaled_predictors <- predictors %>%
+    select(premises_year, most_common_vet, everything(), -ends_with('_S'), -ends_with('_T')) 
+
+by_vet_predictors <- unscaled_predictors %>%
+  group_by(most_common_vet) %>%
+  summarise_if(is.numeric, ~mean(., na.rm = TRUE))%>%
+  select(most_common_vet, mu_SCC_ml, mu_parity, total_prod_per_cow, herd_size, organic, prop_herd_DCT, n_visits)
+  
+low_preds <- by_vet_predictors %>%
+  summarise_if(is.numeric, ~quantile(., 0.025, na.rm = TRUE)) %>%
+  gather(key = 'predictor', value = 'low')
+
+upp_preds <- by_vet_predictors %>%
+  summarise_if(is.numeric, ~quantile(., 0.975, na.rm = TRUE)) %>%
+  gather(key = 'predictor', value = 'upp')
+
+low_preds %>%
+  left_join(upp_preds, by = 'predictor') %>%
+  mutate(low_to_upp = paste0(round(low, 1), ' - ', round(upp, 1))) %>%
+  select(predictor, low_to_upp)
+
+```
+
+

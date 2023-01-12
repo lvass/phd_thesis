@@ -1,0 +1,1210 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+### Load libraries and path
+```{r}
+library(tidyverse)
+library(lubridate)
+
+path <- "/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/synergy/data/"
+save_path <- "/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/synergy/results/"
+
+```
+### Are sales seasonal?
+```{r, fig.height= 6, fig.width= 14}
+synergy_abs_mgkg_tidy_full_years <- readRDS( paste0(path, 'synergy_abs_mgkg_tidy_full_years.Rds'))
+
+synergy_abs_mgkg_tidy_full_years %>%
+  filter(abs_class == 'Sulfonamide') %>%
+  count(med_name, active_sub, admin_route_group, abs_id)
+
+
+synergy_abs_mgkg_tidy_full_years%>%
+  filter(abs_class == 'Sulfonamide') %>%
+  group_by(med_name, active_sub, admin_route_group, year) %>%
+  summarise(sum(abs_mg_kg, na.rm = T))
+
+synergy_abs_mgkg_tidy_full_years %>%
+  filter(abs_id %in% c('abs_75', 'abs_83', 'abs_116', 'abs_167', 'abs_168', 'abs_230')) %>%
+  count(med_name, active_sub, abs_class)
+
+synergy_abs_mgkg_tidy_full_years %>%
+  filter(admin_route_group == 'IM') %>%
+  filter(im_type == 'DCT') %>%
+  count(med_name, active_sub, abs_class)
+synergy_abs_mgkg_tidy_full_years
+
+synergy_abs_mgkg_tidy_full_years %>%
+  filter(abs_class == '4th generation Cephalosporin') %>%
+  filter(year_num == 2010) %>%
+  group_by(med_name, admin_route_group, abs_class, year_num) %>%
+  summarise(mu = mean(abs_mg_kg, na.rm = T)) 
+  ggplot() +
+  geom_line(aes(x = year, y = mu, group = med_name, colour = med_name))
+  
+  synergy_abs_mgkg_tidy_full_years 
+```
+
+```{r}
+mg_kg_outcomes_all_tidy_no_outlier <- readRDS(paste0(path, 'mg_kg_outcomes_all_tidy_no_outlier.Rds'))
+
+herd_years_in_df <- mg_kg_outcomes_all_tidy_no_outlier %>%
+  select(premises_year, premises_id, interherd_premises_id, region, year)
+
+synergy_abs_mgkg_tidy_full_years <- synergy_abs_mgkg_tidy_full_years %>%
+  mutate(premises_year  = paste0(premises_id, '_', year)) %>%
+  filter(premises_year %in% c(herd_years_in_df$premises_year))
+
+years_ranked <- tibble()
+for (i in seq(10,18)){
+  year2010 <- synergy_abs_mgkg_tidy_full_years %>%
+    filter(year == paste0("20", i, "-01-01")) %>%
+    filter(admin_route_group != 'topical') %>%
+    filter(!is.na(abs_class))
+    
+  total <- sum(year2010$abs_mg_kg, na.rm = T) 
+  
+  year2010_per <- year2010 %>%
+    group_by(abs_class) %>%
+    summarise(total_mgkg_sold_esvac = sum(abs_mg_kg, na.rm = T)/total*100) %>%
+    arrange(desc(total_mgkg_sold_esvac))%>%
+    ungroup()
+  
+  year2010_ranked <- year2010_per[1:8,] %>%
+    mutate(rank = seq(1, 8),
+           year = paste0("20", i))
+  
+  years_ranked <- rbind(years_ranked, year2010_ranked)
+}
+
+
+all_years <- years_ranked %>%
+  mutate(total_label = paste0(" ", as.character(round(total_mgkg_sold_esvac)), "%"))
+
+
+
+all_years %>%
+  filter(year %in% c(2010, 2012, 2014, 2016, 2018)) %>%
+  ggplot() +
+  geom_line(aes(x = year, y = -rank, group = abs_class, colour = abs_class), size = 2, alpha = 0.5) +
+  geom_point(aes(x = year, y = -rank, colour = abs_class, size = total_mgkg_sold_esvac), shape = 15) +
+  geom_text(aes(x = year, y = -rank, label = total_label), size = 4) +
+  theme_minimal() +
+  scale_size_continuous(range = c(4, 25)) +
+  ylim(-8, 0)
+
+mg_kg_outcomes_all_tidy_no_outlier %>%
+  filter(am_c)
+```
+
+```{r, fig.height = 3, fig.width = 5}
+year_totals <- synergy_abs_mgkg_tidy_full_years %>%
+  group_by(year) %>%
+  summarise(year_total = sum(abs_mg_kg,na.rm = T))
+year_totals
+synergy_abs_mgkg_tidy_full_years
+levels(synergy_abs_mgkg_tidy_full_years$admin_route_group) 
+
+n_premises <- synergy_abs_mgkg_tidy_full_years %>%
+  group_by(year, premises_id) %>%
+  summarise(n()) %>%
+  count(year)
+
+n_premises
+
+synergy_abs_mgkg_tidy_full_years %>%
+  mutate(admin_route_group = factor(admin_route_group, c('systemic', 'IM', 'topical'))) %>%
+  left_join(n_premises, by = 'year') %>%
+  group_by(month, admin_route_group) %>%
+  summarise(admin_route_sum = sum(abs_mg_kg,na.rm = T)/n)
+  spread(key = 'admin_route_group', value = 'admin_route_sum')
+  ggplot() +
+  geom_line(aes(x = month, y = systemic), colour = dual_blues[2]) +
+  geom_line(aes(x = month, y = IM), colour= dual_blues[1]) +
+  geom_line(aes(x = month, y = topical), colour = dual_greens[2]) +
+  theme_minimal() +
+  ylab('Total mg/kg sold per premises') 
+```
+
+
+
+### Are sales seasonal?
+```{r}
+mg_kg_outcomes_all_tidy_no_outlier <- readRDS(paste0(path, 'mg_kg_outcomes_all_tidy_no_outlier.Rds'))
+```
+
+```{r, fig.width = 8, fig.height=3}
+synergy_abs_mgkg_tidy <- readRDS(paste0(path, 'synergy_abs_mgkg_tidy.Rds'))
+reported_calving <- readRDS(paste0(path, "reported_calving_pattern.Rds")) %>%
+  filter(!(is.na(premises_id)))
+
+mg_kg_month <- synergy_abs_mgkg_tidy %>%
+  left_join(reported_calving, by = 'premises_id') %>%
+  mutate(month_name = month(month, label = T)) %>%
+  group_by(premises_year, premises_id, year, month_name, visit_id, admin_route_group,im_type, calving_pattern) %>%
+  summarise(total_mgkg_sold = sum(abs_mg_kg, na.rm = T))
+
+
+mg_kg_month %>%  
+  filter(!is.na(calving_pattern)) %>%
+  filter(admin_route_group == 'topical') %>%
+  ggplot() +
+geom_boxplot(aes(x = month_name, y = total_mgkg_sold, group  = month_name, colour = calving_pattern), outlier.shape = NA) +
+  facet_wrap(~calving_pattern) +
+  scale_y_continuous(trans = 'log10')+
+  scale_colour_manual(values = c(dual_blues[2], dual_greens[2], dual_blues[1])) +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+
+
+mg_kg_month %>%  
+  filter(!is.na(calving_pattern)) %>%
+  filter(admin_route_group == 'systemic') %>%
+  ggplot() +
+geom_boxplot(aes(x = month_name, y = total_mgkg_sold, group  = month_name, colour = calving_pattern), outlier.shape = NA) +
+  facet_wrap(~calving_pattern) +
+  scale_y_continuous(trans = 'log10')+
+  scale_colour_manual(values = c(dual_blues[2], dual_greens[2], dual_blues[1])) +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=90,hjust=1))
+
+
+mg_kg_month %>%  
+  filter(!is.na(calving_pattern)) %>%
+  filter(im_type == 'LCT') %>%
+  ggplot() +
+geom_boxplot(aes(x = month_name, y = total_mgkg_sold, group  = month_name, colour = calving_pattern), outlier.shape = NA) +
+  facet_wrap(~calving_pattern) +
+  scale_y_continuous(trans = 'log10', limits = c(2e-3, 7.5))+
+  scale_colour_manual(values = c(dual_blues[2], dual_greens[2], dual_blues[1])) +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=90,hjust=1)) +
+  ylab('mg/kg LCT sold') +
+  xlab('')
+
+mg_kg_month %>%  
+  filter(!is.na(calving_pattern)) %>%
+  filter(im_type == 'DCT') %>%
+  ggplot() +
+geom_boxplot(aes(x = month_name, y = total_mgkg_sold, group  = month_name, colour = calving_pattern), outlier.shape = NA) +
+  facet_wrap(~calving_pattern) +
+  scale_y_continuous(trans = 'log10', limits = c(2e-3, 7.5))+
+  scale_colour_manual(values = c(dual_blues[2], dual_greens[2], dual_blues[1])) +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=90,hjust=1)) +
+  ylab('mg/kg DCT sold') +
+  xlab('')
+
+
+```
+
+```{r}
+synergy_abs_mgkg_tidy <- readRDS(paste0(path, 'synergy_abs_mgkg_tidy.Rds'))
+reported_calving <- readRDS(paste0(path, "reported_calving_pattern.Rds")) %>%
+  filter(!(is.na(premises_id)))
+
+purchase_size <- synergy_abs_mgkg_tidy %>%
+  left_join(reported_calving, by = 'premises_id') %>%
+  mutate(month_name = month(month, label = T)) %>%
+  group_by(premises_year, premises_id, year, month_name, visit_id, admin_route_group,im_type, calving_pattern) %>%
+  summarise(total_mgkg_sold = sum(abs_mg_kg, na.rm = T))
+
+purchase_size_grouped <- purchase_size %>%
+  group_by(premises_id, month_name, admin_route_group,im_type, calving_pattern) %>%
+  summarise(av_mg_sold_per_visit_T = log1p(mean(total_mgkg_sold)))  %>%
+  ungroup()
+
+
+purchase_size_grouped %>%
+  filter(admin_route_group == 'systemic') %>%
+  ggplot() +
+  geom_point(aes(x = month_name, y = av_mg_sold_per_visit_T, group  = premises_id), alpha = 0.1, 
+             position = 'jitter') +
+geom_boxplot(aes(x = month_name, y = av_mg_sold_per_visit_T, group  = month_name)) +
+  facet_wrap(~calving_pattern) +
+  scale_y_continuous(trans = 'log10')
+
+purchase_size_grouped %>%
+  filter(!is.na(calving_pattern)) %>%
+  filter(admin_route_group == 'IM') %>%
+  ggplot() +
+  geom_point(aes(x = month_name, y = av_mg_sold_per_visit_T, group  = premises_id), alpha = 0.1, 
+             position = 'jitter') +
+geom_boxplot(aes(x = month_name, y = av_mg_sold_per_visit_T, group  = month_name)) +
+  facet_wrap(~calving_pattern) +
+  scale_y_continuous(trans = 'log10')
+
+purchase_size_grouped %>%
+  filter(!is.na(calving_pattern)) %>%
+  filter(admin_route_group == 'systemic') %>%
+  ggplot() +
+geom_boxplot(aes(x = month_name, y = av_mg_sold_per_visit_T, group  = month_name), outlier.shape = NA) +
+  facet_wrap(~calving_pattern) +
+  scale_y_continuous(trans = 'log10')
+
+purchase_size_grouped %>%
+  filter(!is.na(calving_pattern)) %>%
+  filter(admin_route_group == 'IM') %>%
+  ggplot() +
+geom_boxplot(aes(x = month_name, y = av_mg_sold_per_visit_T, group  = month_name), outlier.shape = NA) +
+  facet_wrap(~calving_pattern) +
+  scale_y_continuous(trans = 'log10')
+
+purchase_size_grouped %>%
+  filter(!is.na(calving_pattern)) %>%
+  filter(admin_route_group == 'topical') %>%
+  ggplot() +
+geom_boxplot(aes(x = month_name, y = av_mg_sold_per_visit_T, group  = month_name), outlier.shape = NA) +
+  facet_wrap(~calving_pattern) +
+  scale_y_continuous(trans = 'log10')
+```
+
+```{r, fig.width = 8, fig.height=3}
+n_visits_per_month <- synergy_abs_mgkg_tidy %>%
+  left_join(reported_calving, by = 'premises_id') %>%
+  mutate(month_name = month(month, label = T)) %>%
+  group_by(premises_year, premises_id, year, month_name, visit_id, calving_pattern) %>%
+  summarise(total_mgkg_sold = n()) %>%
+  group_by(premises_id, premises_year, year, month_name, calving_pattern) %>%
+  summarise(n_visits = n())
+
+n_visits_per_month_grouped <- n_visits_per_month %>%
+  group_by(premises_id, calving_pattern, month_name) %>%
+  summarise(mean_visits = mean(n_visits))
+  
+n_visits_per_month_grouped   %>%
+  filter(!is.na(calving_pattern)) %>%
+  ggplot() +
+  geom_point(aes(x = month_name, y = mean_visits, group  = premises_id), alpha = 0.1, 
+             position = 'jitter') +
+geom_boxplot(aes(x = month_name, y = mean_visits, group  = month_name)) +
+  facet_wrap(~calving_pattern) +
+  scale_y_continuous(trans = 'log10')
+
+n_visits_per_month_grouped   %>%
+  filter(!is.na(calving_pattern)) %>%
+  ggplot() +
+  geom_boxplot(aes(x = month_name, y = mean_visits, group  = month_name, colour = calving_pattern), outlier.shape = NA) +
+  facet_wrap(~calving_pattern) +
+  scale_y_continuous(limits = c(0.5, 8))+
+  scale_colour_manual(values = c(dual_blues[2], dual_greens[2], dual_blues[1])) +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=90,hjust=1)) +
+  ylab('Mean number of AM \npurchase events') +
+  xlab('')
+```
+### Differences between vets
+```{r, fig.width = 8, fig.height=3}
+synergy_RF_unscaled <- readRDS(paste0(path, 'synergy_RF_unscaled.Rds'))
+
+synergy_abs_mgkg_tidy_full_years <- readRDS( paste0(path, 'synergy_abs_mgkg_tidy_full_years.Rds'))
+
+synergy_abs_mgkg_tidy_full_years
+synergy_RF_unscaled
+
+synergy_abs_mgkg_tidy_full_years %>%
+  filter(!is.na(vet_id)) %>%
+  filter(vet_id != 'vet_id') %>%
+  group_by(vet_id) %>%
+  summarise(med_perscribing = median(abs_mg_kg, na.rm = T),
+            low_perscribing = quantile(abs_mg_kg,0.25, na.rm = T),
+            upp_perscribing = quantile(abs_mg_kg, 0.75,na.rm = T)) %>%
+  ggplot() +
+  geom_point(aes(x = reorder(vet_id, med_perscribing), y = med_perscribing), colour = dual_blues[1]) +
+  geom_errorbar(aes(x = reorder(vet_id, med_perscribing), ymin= low_perscribing, ymax = upp_perscribing), colour = dual_blues[2]) +
+  scale_y_continuous(trans = 'log10') +
+  theme_minimal()
+
+
+region_summary <- synergy_abs_mgkg_tidy_full_years %>%
+  group_by(region, year) %>%
+  summarise(med_perscribing = mean(abs_mg_kg, na.rm = T))
+region_summary
+region_medians <- region_summary %>%
+  group_by(region) %>%
+  summarise(med = mean(med_perscribing, na.rm = T))
+ region_medians$med[1]
+  region_medians
+  
+region_summary %>%
+  ggplot() +
+  stat_density(aes(x = med_perscribing, group = region, fill = region), alpha = 0.5, bins = 50) +
+  scale_x_continuous(trans = 'log10') +
+  scale_fill_manual(values = c(dual_blues[2], dual_greens[2], dual_blues[1]),
+                    labels = c('Region 1', 'Region 2', 'Region 3')) +
+  theme_minimal() +
+  xlab('Mean mg/PCU perscribed per vet per year')+
+  ylab('Density')
+
+synergy_abs_mgkg_tidy_full_years
+
+region_summary <- synergy_RF_unscaled %>%
+  group_by(region) %>%
+  summarise(med_perscribing = median(total_mgkg_esvac, na.rm = T))
+region_summary
+synergy_RF_unscaled %>%
+  ggplot() +
+  geom_histogram(aes(x = total_mgkg_esvac, fill = region), bins = 50) +
+   scale_fill_manual(values = c(dual_blues[2], dual_greens[2], dual_blues[1]),
+                    labels = c('Region 1', 'Region 2', 'Region 3')) +
+    scale_x_continuous(trans = 'log10')+
+  xlab('Mean mg/PCU sold per premises-year')+
+  ylab('Premises-year count')
+
+
+synergy_RF_unscaled %>%
+  ggplot() +
+  geom_histogram(aes(x = total_mgkg_esvac, fill = region), bins = 50, alpha = 0.7) +
+   scale_fill_manual(values = c(dual_blues[2], dual_greens[2], dual_blues[1]),
+                    labels = c('Region 1', 'Region 2', 'Region 3')) +
+    scale_x_continuous(trans = 'log10')+
+  xlab('Mean mg/PCU sold per premises-year')+
+  ylab('Premises-year count')+
+  theme_minimal()
+
+synergy_RF_unscaled %>%
+  group_by(premises_year, year, most_common_vet) %>%
+  summarise(mu_sold_premises = mean(total_mgkg_esvac)) %>%
+  group_by(most_common_vet, year) %>%
+  summarise(mu_sold = mean(mu_sold_premises)) %>%
+  ggplot() +
+  geom_boxplot(aes(x = year, y = mu_sold, group = year), fill = dual_blues[1], alpha = 0.5)+
+  xlab('Year')+
+  ylab('Mean mg/PCU sold by each vet') +
+  theme_minimal()
+
+
+synergy_RF_unscaled %>%
+  group_by(premises_year, year, most_common_vet) %>%
+  summarise(mu_sold_premises = mean(total_mgkg_esvac)) %>%
+  group_by(most_common_vet, year) %>%
+  summarise(mu_sold = mean(mu_sold_premises)) %>%
+  group_by(year) %>%
+  summarise(q25= quantile(mu_sold, 0.25),
+            q75 = quantile(mu_sold, 0.75)) %>%
+  mutate(diff = q75-q25)
+
+synergy_abs_mgkg_tidy_full_years %>%
+  count(vet_id)
+
+```
+```{r, fig.width = 10, fig.height=3}
+synergy_abs_mgkg_tidy_full_years %>%
+  filter(!is.na(vet_id)) %>%
+  filter(vet_id != 'vet_id') %>%
+  group_by(vet_id, region, admin_route_group) %>%
+  summarise(med_perscribing = median(abs_mg_kg, na.rm = T)) %>%
+  ggplot() +
+  stat_density(aes(x = med_perscribing, group = region, fill = region), alpha = 0.5) +
+  scale_fill_manual(values = c(dual_blues[2], dual_greens[2], dual_blues[1])) +
+  scale_x_continuous(trans = 'log10') +
+  facet_wrap(~admin_route_group) +
+  theme_minimal()
+
+
+```
+
+```{r, fig.width = 5, fig.height = 4}
+synergy_abs_mgkg_tidy <- readRDS(paste0(path, 'synergy_abs_mgkg_tidy.Rds'))
+reported_calving <- readRDS(paste0(path, "reported_calving_pattern.Rds")) %>%
+  filter(!(is.na(premises_id)))
+
+prem_sample <- ((synergy_abs_mgkg_tidy %>%
+  count(premises_id))$premises_id)[1:10]
+
+synergy_abs_mgkg_tidy_with_calving <- synergy_abs_mgkg_tidy %>%
+  left_join(reported_calving, by = 'premises_id')
+
+n_visits <- synergy_abs_mgkg_tidy_with_calving %>%
+  filter(premises_id %in% prem_sample) %>%
+  count(premises_id, date, year, visit_id) %>%
+  count(premises_id, year)
+n_visits
+total_purchases <- synergy_abs_mgkg_tidy_with_calving %>%
+  group_by(premises_id, year, premises_year) %>%
+  summarise(total_year = sum(abs_mg_kg, na.rm = T))
+
+mean_year <- total_purchases %>%
+  group_by(premises_id) %>%
+  summarise(mu_year = mean(total_year, na.rm = T)) %>%
+  arrange(mu_year) %>%
+  mutate(quant_char = as.character(ntile(mu_year, 10)),
+         quant = ntile(mu_year, 10))
+  
+mean_year
+mean_year
+129/10
+amount_purchased <- synergy_abs_mgkg_tidy_with_calving %>%
+  filter(premises_id %in% prem_sample) %>%
+  group_by(premises_id, year) %>%
+  summarise(mgkg_purchased = sum(abs_mg_kg, na.rm = T))
+
+mean_purchase_size <- synergy_abs_mgkg_tidy_with_calving %>%
+  group_by(premises_id, year, visit_id) %>%
+  summarise(mgkg_per_purchase = sum(abs_mg_kg, na.rm = T)) %>%
+  group_by(premises_id, year) %>%
+  summarise(mu_mgkg_per_purchase = mean(mgkg_per_purchase))
+
+mean_purchase_size <- mean_purchase_size %>%
+  left_join(total_purchases, by = c('premises_id', 'year'))
+
+synth_df <- tibble(synthetic_total = seq(min(total_purchases$total_year), max(total_purchases$total_year), 10))
+synth_df <- synth_df %>%
+  mutate(synthetic_mean_n10 = synthetic_total/3,
+         synthetic_mean_n20 = synthetic_total/10,
+         synthetic_mean_n30 = synthetic_total/30,
+         synthetic_mean_n40 = synthetic_total/100,
+         synthetic_mean_n50= synthetic_total/500)
+
+mean_purchase_size %>%
+  ggplot() +
+  geom_point(aes(y = total_year, x = mu_mgkg_per_purchase), outlier.shape = NA, colour = dual_blues[1], alpha = 0.2) +
+  geom_line(data = synth_df, aes(y = synthetic_total, x = synthetic_mean_n10), linetype = 2, colour = 'darkgrey') +
+  geom_line(data = synth_df, aes(y = synthetic_total, x = synthetic_mean_n20), linetype = 2, colour = 'darkgrey') +
+  geom_line(data = synth_df, aes(y = synthetic_total, x = synthetic_mean_n30), linetype = 2, colour = 'darkgrey') +
+  geom_line(data = synth_df, aes(y = synthetic_total, x = synthetic_mean_n40), linetype = 2, colour = 'darkgrey') +
+  scale_y_continuous(trans = 'log10') +
+  scale_x_continuous(trans = 'log10') +
+  theme_minimal()
+```
+
+
+```{r, fig.height = 3, fig.width = 6}
+mean_purchase_size %>%
+  mutate(quint = ntile(total_year, 5)) %>%
+  ggplot() +
+  stat_dist_halfeye(aes(x = mu_mgkg_per_purchase, y = as.factor(quint)), fill  = dual_blues[2], alpha = 0.5)  +
+  scale_x_continuous(trans = 'log10') +
+  theme_minimal()
+
+mean_purchase_size %>%
+  mutate(quint = ntile(total_year, 5)) %>%
+  group_by(quint) %>%
+  summarise(mu_total = mean(total_year),
+            mu_size = mean(mu_mgkg_per_purchase),
+            mu_total/mu_size)
+
+
+
+
+mean(n_visits$n)
+
+mean_purchase_size
+
+synergy_RF_unscaled %>%
+  mutate(quint = ntile(total_mgkg_esvac, 5)) %>%
+  ggplot() +
+  stat_dist_halfeye(aes(x = n_visits, y = as.factor(quint)), fill  = dual_blues[2], alpha = 0.5)  +
+  theme_minimal()
+
+median(synergy_RF_unscaled$n_visits)
+quantile(synergy_RF_unscaled$n_visits, 0.25)
+quantile(synergy_RF_unscaled$n_visits, 0.75)
+
+
+synergy_RF_unscaled %>%
+  mutate(quint = ntile(total_mgkg_esvac, 5)) %>%
+  group_by(quint) %>%
+  summarise(mean(n_visits))
+```
+
+
+
+### Trends over time
+```{r}
+synergy_RF_unscaled <- synergy_RF_unscaled %>%
+  mutate(year = as.numeric(year))
+varss_values <- tibble("year" = c(unique(synergy_RF_unscaled$year), 2019),
+                       "yearly_abs_mgkg" = c(rep(NA, 5), 24, 26, 21.9, 22.8, 22.5)) %>%
+  mutate(yearly_abs_mgkg = yearly_abs_mgkg,
+         year = as.numeric(year))
+
+ggplot() +
+  geom_boxplot(data = synergy_RF_unscaled,
+               aes(y = total_mgkg_esvac, x =year, group = year), outlier.shape = NA, fill = dual_blues[2], 
+              colour = dual_blues[2], alpha = 0.6) +
+  geom_point(data = synergy_RF_unscaled,
+             aes(y = total_mgkg_esvac, x =year), position = "jitter", colour = dual_blues[1], alpha = 0.3) +
+  geom_point(data = varss_values,
+             aes(y = yearly_abs_mgkg, x = year), colour = dual_greens[2], size = 2, shape = 15) +
+  geom_line(data = varss_values,
+             aes(y = yearly_abs_mgkg, x = year), colour = dual_greens[2], size = 1) +
+  geom_hline(aes(yintercept = 21), linetype = 2, colour = 'red') +
+  scale_y_continuous(trans = "log10", limits = c(1, NA), breaks = ) +
+  scale_x_continuous(breaks = seq(2010, 2019)) +
+  theme_minimal() +
+  xlab("Year") +
+  ylab("Antimicrobial sales per year (mg/kg)") 
+  
+synergy_RF_unscaled 
+unique(synergy_RF_unscaled$year)
+ggplot() +
+  geom_line(data = varss_values, 
+             aes(y = yearly_abs_mgkg, x = year), colour = dual_greens[2], size = 1) 
+
+varss_values
+
+synergy_RF_unscaled
+```
+
+```{r, fig.width=4, fig.height=3}
+synergy_RF_unscaled %>%
+  mutate(above_target = ifelse(total_mgkg_esvac > 21, 1, 0)) %>%
+  group_by(year) %>%
+  summarise(mu = mean(above_target)) %>%
+  ggplot() +
+  geom_bar(aes(y = mu*100, x =year, group = year), stat = 'identity', fill = dual_blues[2], 
+              colour = dual_blues[2], alpha = 0.6)+
+  geom_text(aes(y = mu*100 + 1.5, x =year, label = paste0(round(mu*100), '%')), stat = 'identity', 
+              colour = dual_blues[1])+
+  xlab('Year') +
+  ylab('% study herds \nabove RUMA 2020 target') +
+  theme_minimal()
+```
+
+```{r}
+synergy_abs_mgkg_tidy_full_years <- readRDS( paste0(path, 'synergy_abs_mgkg_tidy_full_years.Rds'))
+custom_colours <- c("3rd generation Cephalosporin" = dual_blues[2],
+                   "4th generation Cephalosporin" = dual_blues[1],
+                   "Fluoroquinolone" = dual_greens[2],
+                   "Polymixin" = dual_greens[1])
+
+hpcia_summary <- synergy_abs_mgkg_tidy_full_years %>%
+  filter(date >= "2010-01-01" & date < "2019-01-01") %>%
+  filter(hpcia == 1) %>%
+  group_by(year, med_name, abs_class) %>%
+  summarise(mgkg_purchased_premises = sum(abs_mg_kg, na.rm = T))
+
+hpcia_summary %>%
+  ggplot() +
+  geom_bar(aes(x = year, y = mgkg_purchased_premises, fill =  abs_class), stat = "identity", position = "dodge", alpha = 0.7) +
+  scale_fill_manual(values = custom_colours) +
+  labs(fill = "Antimicrobial class",
+       x = "Year",
+       y = "Mean yearly antimicrobial use\n per premises (mg/kg)") +
+  theme_minimal() 
+
+hpcia_summary %>%
+  filter(abs_class == '3rd generation Cephalosporin')
+```
+
+```{r, fig.height =4, fig.width = 6}
+custom_colours <- c("DCT" = dual_blues[2],
+                   "LCT" = dual_blues[1],
+                   "systemic" = dual_greens[2],
+                   "topical" = dual_greens[1])
+
+year_sums <- synergy_abs_mgkg_tidy_full_years %>%
+  group_by(year) %>%
+  summarise(year_sum = sum(abs_mg_kg, na.rm = T))
+
+by_admin_type <- synergy_abs_mgkg_tidy_full_years %>%
+  group_by(admin_route_group, im_type, year) %>%
+  summarise(sum_use  = sum(abs_mg_kg, na.rm = T)) %>%
+  left_join(year_sums, by = 'year') %>%
+  mutate(per_use = sum_use/year_sum*100) %>%
+  select(-sum_use, -year_sum) %>%
+  gather(key = 'key', value = 'am_type', -year, -per_use) %>%
+  filter(!is.na(am_type)) %>%
+    filter(am_type != 'IM') %>%
+  mutate(am_type = factor(am_type, levels = c('systemic', 'DCT', 'LCT', 'topical')))
+
+labels_2018 <- by_admin_type %>%
+  filter(year == '2018-01-01') %>%
+  mutate(per_use_label = as.character(paste0(round(per_use), '%')))
+
+by_admin_type %>%
+  ggplot() +
+  geom_bar(aes(x = year, y = per_use, fill = am_type), stat = 'identity', alpha = 0.8) +
+    geom_text(data = labels_2018, aes(x = date('2019-01-01'), y = c(1, 25, 15, 8), label = per_use_label, colour = am_type)) +
+  scale_fill_manual(values = custom_colours) +
+  scale_colour_manual(values = custom_colours) +
+  theme_minimal() +
+  ylab('Percentage of total') +
+  xlab('Year')
+
+labels_2018
+
+by_admin_type %>%
+  filter(year == '2010-01-01') %>%
+  mutate(per_use_label = as.character(paste0(round(per_use), '%')))
+```
+
+```{r, fig.height=3, fig.width = 6}
+premises_am_quintiles <- synergy_abs_mgkg_tidy %>%
+  filter(year != '2019-01-01') %>%
+  filter(year != '2009-01-01') %>%
+   left_join(medicine_indications, by = 'med_name') %>%
+  mutate(indication = ifelse(indication == 'eye', 'soft tissue',
+                             ifelse(indication == 'UI', 'uterine', 
+                       indication))) %>%
+  distinct() %>%
+  group_by(premises_id) %>%
+  summarise(sum_am = sum(abs_mg_kg, na.rm = T)) %>%
+  ungroup() %>%
+  mutate(mu_am_q = as.factor(ntile(sum_am, 5))) %>%
+  select(premises_id,sum_am, mu_am_q)
+
+yearly_sums_per_am_type_by_quintile <- synergy_abs_mgkg_tidy_full_years %>%
+  left_join(premises_am_quintiles, by = 'premises_id') %>%
+  group_by(admin_route_group, im_type, year, mu_am_q) %>%
+  summarise(sum_use  = sum(abs_mg_kg, na.rm = T)) %>%
+  gather(key = 'key', value = 'am_type', -year, -sum_use, -mu_am_q) %>%
+  filter(!is.na(am_type)) %>%
+  filter(am_type != 'IM') %>%
+  mutate(am_type = factor(am_type, levels = c( 'topical', 'LCT', 'DCT', 'systemic'))) %>%
+  select(-key)
+
+year_sums <- yearly_sums_per_am_type_by_quintile %>%
+  group_by(mu_am_q, year) %>%
+  summarise(total_year_use = sum(sum_use))
+
+yearly_sums_per_am_type_by_quintile %>%
+  left_join(year_sums, by = c('mu_am_q', 'year'))%>%
+  mutate(per_use = sum_use/total_year_use*100) %>%
+  select(-sum_use, -total_year_use) %>%
+  group_by(mu_am_q, am_type) %>%
+  summarise(mu_per_am_type = mean(per_use)) %>%
+  ggplot() +
+  geom_bar(aes(x = '', y = mu_per_am_type, group = mu_am_q, fill = am_type), alpha = 0.8, stat = 'identity') +
+  scale_fill_manual(values = custom_colours) +
+  theme_minimal() +
+  ylab('Percentage of AMs sold of each type') +
+  facet_wrap(~mu_am_q, nrow = 1)
+
+start_years
+yearly_sums_per_quintile
+```
+
+```{r, fig.width=6, fig.height=4}
+synergy_abs_mgkg_tidy_full_years <- readRDS( paste0(path, 'synergy_abs_mgkg_tidy_full_years.Rds'))
+
+
+start_in_2010 <- synergy_abs_mgkg_tidy_full_years %>%
+  group_by(premises_id) %>%
+  summarise(start_year = min(year),
+            end_year = max(year)) %>%
+  filter(start_year ==  '2010-01-01') %>%
+  filter(end_year == '2018-01-01') %>%
+  droplevels()
+
+
+start_sums <- synergy_abs_mgkg_tidy_full_years %>%
+  group_by(premises_id, year) %>%
+  summarise(start_year_sums = sum(abs_mg_kg, na.rm = T)) %>%
+  filter(year == '2010-01-01') %>%
+  select(-year)
+
+per_change_df <- synergy_abs_mgkg_tidy_full_years %>%
+  group_by(premises_id, year) %>%
+  summarise(year_premises_sums = sum(abs_mg_kg, na.rm = T)) %>%
+  filter(premises_id %in% c(start_in_2010$premises_id)) %>%
+  left_join(start_sums, by = 'premises_id') %>%
+  ungroup() %>%
+  mutate(per_change = (year_premises_sums/start_year_sums)*100)
+
+per_change_df %>%
+  ggplot() +
+  geom_line(aes(x = year, y = per_change, group = premises_id), colour = dual_blues[2], size = 0.75, alpha = 0.6) +
+  ylim(0, 350) +
+  theme_minimal() +
+  xlab('Year') +
+  ylab('Percentage change')
+
+quantile((per_change_df %>%
+  filter(year == '2018-01-01'))$per_change, 0.5)
+
+100-66.86184
+
+```
+
+```{r}
+
+start_sums <- synergy_abs_mgkg_tidy_full_years %>%
+  group_by(premises_id, year) %>%
+  summarise(year_premises_sums = sum(abs_mg_kg, na.rm = T)) %>%
+  filter(premises_id %in% c(start_in_2010$premises_id)) %>%
+  filter(year == '2010-01-01') %>%
+  ungroup() %>%
+  mutate(quint = ntile(year_premises_sums, 5))
+start_sums
+start_sums  %>%
+  group_by(quint) %>%
+  summarise(mean(year_premises_sums))
+
+
+mean(changes_amu$start_year_sums, na.rm = T)
+
+66.86184	
+
+start_sums %>%
+  count(premises_id)
+```
+
+```{r, fig.width=8, fig.height=4}
+
+start_sums <- start_sums %>%
+    rename('start_year_sums' = 'year_premises_sums')
+
+synergy_abs_mgkg_tidy_full_years %>%
+  group_by(premises_id, year) %>%
+  summarise(year_premises_sums = sum(abs_mg_kg, na.rm = T)) %>%
+  filter(premises_id %in% c(start_in_2010$premises_id)) %>%
+  left_join(start_sums, by = 'premises_id') %>%
+  ungroup() %>%
+  mutate(per_change = ((year_premises_sums/start_year_sums)*100)-100) %>%
+  filter(year.x != '2010-01-01') %>%
+  ggplot() +
+  geom_boxplot(aes(x = year.x, y = per_change, group = year.x), colour = dual_blues[1], fill = dual_blues[2], size = 0.75, alpha = 0.6) +
+  geom_hline(aes(yintercept = 0), colour = 'red', linetype = 2) +
+  ylim(-150, 200) +
+  theme_minimal() +
+  xlab('Year') +
+  ylab('mg/kg AM sales percentage\n change compared to 2010')
+
+  
+quints <- synergy_abs_mgkg_tidy_full_years %>%
+  filter(year == '2010-01-01') %>%
+  filter(admin_route_group != 'topical') %>%
+  group_by(premises_id) %>%
+  summarise(premises_sums = sum(abs_mg_kg, na.rm = T)) %>%
+  ungroup() %>%
+  mutate(premises_sums_quint = ntile(premises_sums, 5)) %>%
+  select(premises_id, premises_sums_quint)
+
+synergy_abs_mgkg_tidy_full_years %>%
+  group_by(premises_id, year) %>%
+  summarise(year_premises_sums = sum(abs_mg_kg, na.rm = T)) %>%
+  filter(premises_id %in% c(start_in_2010$premises_id)) %>%
+  left_join(start_sums, by = 'premises_id') %>%
+  ungroup() %>%
+  mutate(per_change = ((year_premises_sums/start_year_sums)*100)-100) %>%
+  left_join(quints, by = 'premises_id') %>%
+  group_by(year, premises_sums_quint) %>%
+  summarise(mu_per_change  = median(per_change)) %>%
+  ggplot() +
+  geom_line(aes(x = year, y = mu_per_change, group = premises_sums_quint, colour = log(premises_sums_quint)), fill = dual_blues[2], size = 0.9) +
+  geom_hline(aes(yintercept = 0), colour = 'red', linetype = 2) +
+  ylim(-100, 75) +
+  theme_minimal() +
+  xlab('Year') +
+  ylab('mg/kg AM sales percentage\n change compared to 2010')
+
+
+synergy_abs_mgkg_tidy_full_years %>%
+  group_by(premises_id, year) %>%
+  summarise(year_premises_sums = sum(abs_mg_kg, na.rm = T)) %>%
+  filter(premises_id %in% c(start_in_2010$premises_id)) %>%
+  left_join(start_sums, by = 'premises_id') %>%
+  ungroup() %>%
+  mutate(per_change = ((year_premises_sums/start_year_sums)*100)-100) %>%
+  left_join(quints, by = 'premises_id') %>%
+  group_by(year, premises_sums_quint) %>%
+  summarise(mu_per_change  = quantile(per_change, 0.75)) %>%
+  filter(year == '2018-01-01')
+
+synergy_abs_mgkg_tidy_full_years %>%
+  filter(year == '2010-01-01') %>%
+  filter(admin_route_group != 'topical') %>%
+  group_by(premises_id) %>%
+  summarise(premises_sums = sum(abs_mg_kg, na.rm = T)) %>%
+  ungroup() %>%
+  mutate(premises_sums_quint = ntile(premises_sums, 5)) %>%
+  group_by(premises_sums_quint) %>%
+  summarise(median(premises_sums))
+```
+
+### How many years of data per premises
+```{r}
+mg_kg_outcomes_all_tidy_no_outlier <- readRDS(paste0(path, 'mg_kg_outcomes_all_tidy_no_outlier.Rds'))
+min((mg_kg_outcomes_all_tidy_no_outlier %>%
+  count(premises_id))$n)
+
+7.5 (range of 1 - 9 years)
+```
+
+```{r, fig.height=3, fig.width = 6}
+synergy_abs_mgkg_tidy <- readRDS(paste0(path, 'synergy_abs_mgkg_tidy.Rds'))
+medicine_indications <- read.csv(paste0(path, 'medicine_indications.csv'))
+
+medicine_indications <- medicine_indications %>%
+  gather(key = 'indication_number', value = 'indication', -medicine) %>%
+  select(-indication_number) %>%
+  rename('med_name' = 'medicine') %>%
+  filter(indication != '#N/A')
+unique(medicine_indications$indication)
+
+
+years_totals <- synergy_abs_mgkg_tidy %>%
+  left_join(medicine_indications, by = 'med_name') %>%
+  group_by(year) %>%
+  summarise(total_all = sum(abs_mg_kg, na.rm = T))
+
+by_indication <- synergy_abs_mgkg_tidy %>%
+  left_join(medicine_indications, by = 'med_name') %>%
+  mutate(indication = ifelse(indication == 'eye', 'soft tissue',
+                             ifelse(indication == 'UI', 'uterine', 
+                       indication))) %>%
+  group_by(indication, year) %>%
+  summarise(total_indication = sum(abs_mg_kg, na.rm = T)) %>%
+  left_join(years_totals, by = 'year') %>%
+  mutate(per_indication = total_indication/total_all) %>%
+  filter(year != '2019-01-01') %>%
+  filter(year != '2009-01-01') 
+
+by_indication %>%
+  ggplot() +
+  geom_bar(aes(x = year, y = per_indication*100, group = indication, fill = indication), alpha = 0.8, stat = 'identity') +
+  scale_fill_manual(values = c(dual_blues[1], dual_blues[2], dual_greens[1], dual_greens[2], '#c6baff', '#623db3', '#87ffdd', '#2f8069', '#828282')) +
+  theme_minimal() +
+  xlab('Year') + 
+  ylab('Percentage of medicines sold \nwith each clinical indicaiton*')
+by_indication
+nyears <- synergy_abs_mgkg_tidy %>%
+  filter(year != '2019-01-01') %>%
+  filter(year != '2009-01-01') %>%
+  count(premises_id, year) %>%
+  count(premises_id)
+
+premises_am_quintiles <- synergy_abs_mgkg_tidy %>%
+  filter(year != '2019-01-01') %>%
+  filter(year != '2009-01-01') %>%
+   left_join(medicine_indications, by = 'med_name') %>%
+  mutate(indication = ifelse(indication == 'eye', 'soft tissue',
+                             ifelse(indication == 'UI', 'uterine', 
+                       indication))) %>%
+  distinct() %>%
+  group_by(premises_id) %>%
+  summarise(sum_am = sum(abs_mg_kg, na.rm = T)) %>%
+  ungroup() %>%
+  mutate(mu_am_q = as.factor(ntile(sum_am, 5))) %>%
+  select(premises_id,sum_am, mu_am_q)
+
+
+am_per_by_indication_quintiles <- synergy_abs_mgkg_tidy %>%
+  filter(year != '2019-01-01') %>%
+  filter(year != '2009-01-01') %>%
+  left_join(medicine_indications, by = 'med_name') %>%
+  mutate(indication = ifelse(indication == 'eye', 'soft tissue',
+                             ifelse(indication == 'UI', 'uterine', 
+                       indication))) %>%
+  distinct() %>%
+  group_by(premises_id, indication) %>%
+  summarise(sum_am_indication = sum(abs_mg_kg, na.rm = T)) %>%
+  left_join(nyears, by = 'premises_id') %>%
+  left_join(premises_am_quintiles, by = 'premises_id')  %>%
+  mutate(per_indication = sum_am_indication/sum_am*100) %>%
+  group_by(mu_am_q, indication) %>%
+  summarise(mu_per_indication = mean(per_indication))
+
+by_indication %>%
+  filter(year == '2018-01-01') %>%
+  mutate(per = round(per_indication*100, 2)) %>%
+  select(indication, per)
+
+am_per_by_indication_quintiles %>%
+  ggplot() +
+  geom_bar(aes(x = '', y = mu_per_indication, group = indication, fill = indication), alpha = 0.8, stat = 'identity') +
+  scale_fill_manual(values = c(dual_blues[1], dual_blues[2], dual_greens[1], dual_greens[2], '#c6baff', '#623db3', '#87ffdd', '#2f8069', '#828282')) +
+  theme_minimal() +
+  ylab('Percentage of medicines sold \nwith each clinical indicaiton*') +
+  facet_wrap(~mu_am_q, nrow = 1)
+
+```
+
+### What DCT and LCT classes and products?
+```{r, fig.width = 8, fig.height=6}
+mg_kg_outcomes_all_tidy_no_outlier <- readRDS(paste0(path, 'mg_kg_outcomes_all_tidy_no_outlier.Rds'))
+
+herd_years_in_df <- mg_kg_outcomes_all_tidy_no_outlier %>%
+  select(premises_year, premises_id, interherd_premises_id, region, year)
+
+synergy_abs_mgkg_tidy_full_years <- synergy_abs_mgkg_tidy_full_years %>%
+  mutate(premises_year  = paste0(premises_id, '_', year)) %>%
+  filter(premises_year %in% c(herd_years_in_df$premises_year))
+
+years_ranked <- tibble()
+for (i in seq(10,18)){
+  year2010 <- synergy_abs_mgkg_tidy_full_years %>%
+    filter(year == paste0("20", i, "-01-01")) %>%
+    filter(im_type == 'LCT') %>%
+    filter(!is.na(active_sub))
+    
+  total <- sum((year2010 %>%
+    mutate(total_doses = quantity*unit_correction))$total_doses, na.rm = T)
+  
+  year2010_per <- year2010 %>%
+    group_by(active_sub) %>%
+    summarise(total_doses = quantity*unit_correction,
+              total_mgkg_sold_esvac = sum(total_doses, na.rm = T)/total*100) %>%
+    arrange(desc(total_mgkg_sold_esvac))%>%
+    select(-total_doses) %>%
+    ungroup() %>%
+    distinct()
+  
+  year2010_ranked <- year2010_per[1:5,] %>%
+    mutate(rank = seq(1, 5),
+           year = paste0("20", i))
+  
+  years_ranked <- rbind(years_ranked, year2010_ranked)
+}
+
+
+all_years <- years_ranked %>%
+  ungroup() %>%
+  mutate(total_label = paste0(" ", as.character(round(total_mgkg_sold_esvac)), "%"))
+
+all_years
+
+all_years %>%
+  filter(year %in% c(2010, 2012, 2014, 2016, 2018)) %>%
+  ggplot() +
+  geom_line(aes(x = year, y = -rank, group = active_sub, colour = active_sub), size = 2, alpha = 0.5) +
+  geom_point(aes(x = year, y = -rank, colour = active_sub, size = total_mgkg_sold_esvac), shape = 15) +
+  geom_text(aes(x = year, y = -rank, label = total_label), size = 4) +
+  theme_minimal() +
+  scale_size_continuous(range = c(4, 25)) +
+  ylim(-5, 0) +ggtitle('LCT')
+
+synergy_abs_mgkg_tidy_full_years
+```
+
+
+```{r}
+synergy_abs_mgkg_tidy_full_years %>%
+  filter(hpcia == 1) %>%
+  group_by(abs_class) %>% #med_name, active_sub, abs_class, 
+  summarise(sum(abs_mg_kg, na.rm = T))
+```
+
+```{r}
+synergy_RF_unscaled %>%
+  ggplot() +
+  geom_boxplot(aes(x = year, prop_herd_DCT, group = year))
+
+dct_2010 <- synergy_RF_unscaled %>%
+  filter(year == 2010) %>%
+  select(premises_id, prop_herd_DCT)
+
+dct_2014 <- synergy_RF_unscaled %>%
+  filter(year == 2014) %>%
+  select(premises_id, prop_herd_DCT) %>%
+  rename('prop_herd_DCT_2014' = 'prop_herd_DCT' )
+
+dct_2018 <- synergy_RF_unscaled %>%
+  filter(year == 2018) %>%
+  select(premises_id, prop_herd_DCT) %>%
+  rename('prop_herd_DCT_2018' = 'prop_herd_DCT' )
+
+dct_2010 %>%
+  left_join(dct_2014, by = 'premises_id') %>%
+  left_join(dct_2018, by = 'premises_id') %>%
+  filter(!is.na(prop_herd_DCT_2014)) %>%
+  filter(!is.na(prop_herd_DCT_2018)) %>%
+  mutate(diff1 = (prop_herd_DCT_2014/prop_herd_DCT)*100,
+         diff2 = (prop_herd_DCT_2018/prop_herd_DCT_2014)*100)
+  ggplot() +
+  geom_boxplot(aes(x = year, prop_herd_DCT, group = year))
+
+synergy_abs_mgkg_tidy_full_years
+synergy_abs_mgkg_tidy_full_years %>%
+  filter(visit_id == 'visit_32353')
+
+synergy_RF_unscaled %>%
+  select(year, premises_id, prop_herd_DCT) %>%
+  arrange(premises_id, year) %>%
+  mutate(lagged_prop_DCT = lag(prop_herd_DCT),
+         lagged_premises_id = lag(premises_id),
+         match = ifelse(premises_id == lagged_premises_id, 1, 0),
+         change = (lagged_prop_DCT/prop_herd_DCT)*100) %>%
+  filter(match == 1) %>%
+  ggplot() +
+  geom_boxplot(aes(x = year, y = change, group = year)) +
+  ylim(0,500)
+
+synergy_RF_unscaled %>%
+  select(year, premises_id, prop_herd_DCT) %>%
+  ggplot() +
+  geom_boxplot(aes(x = year, y = prop_herd_DCT, group = year))
+
+```
+
+
+```{r, fig.width= 12, fig.height=3}
+synergy_RF_unscaled %>%
+  filter(year_num != 2018) %>%
+  mutate(prop_herd_DCT = ifelse(prop_herd_DCT > 1, 1, prop_herd_DCT)) %>%
+  mutate(quint = ntile(total_mgkg_esvac, 5)) %>%
+  select(year_num, premises_id, prop_herd_DCT, quint) %>%
+  group_by(year_num, quint) %>%
+  summarise(low = quantile(prop_herd_DCT, 0.25, na.rm = T),
+            upp = quantile(prop_herd_DCT, 0.75, na.rm = T),
+            med = quantile(prop_herd_DCT, 0.5, na.rm = T)) %>%
+  ggplot() +
+  geom_ribbon(aes(x = year_num+1, ymin = low*100, ymax = upp*100), alpha = 0.3, fill = dual_greens[2]) +
+  geom_line(aes(x = year_num+1, y =  med*100), colour = dual_greens[1]) +
+  scale_x_continuous(limits = c(2010, 2018)) +
+  facet_wrap(~quint, nrow = 1) +
+  theme_minimal() +
+  xlab('Year') +
+  ylab('% DCT previous year')
+  
+  synergy_RF_unscaled
+  
+  synergy_RF_unscaled %>%
+  filter(year_num != 2018) %>%
+  mutate(prop_herd_DCT = ifelse(prop_herd_DCT > 1, 1, prop_herd_DCT)) %>%
+  mutate(quint = ntile(total_mgkg_esvac, 5)) %>%
+  select(year_num, premises_id, prop_herd_DCT, quint) %>%
+  group_by(year_num) %>%
+  summarise(low = quantile(prop_herd_DCT, 0.25, na.rm = T),
+            upp = quantile(prop_herd_DCT, 0.75, na.rm = T),
+            med = quantile(prop_herd_DCT, 0.5, na.rm = T))
+```
+
+
+```{r, fig.width= 12, fig.height=3}
+synergy_RF_unscaled %>%
+  mutate(quint = ntile(total_mgkg_esvac, 5)) %>%
+  select(year_num, premises_id, mu_SCC_ml, quint) %>%
+  group_by(year_num, quint) %>%
+  summarise(low = quantile(mu_SCC_ml, 0.25, na.rm = T)/1000,
+            upp = quantile(mu_SCC_ml, 0.75, na.rm = T)/1000,
+            med = quantile(mu_SCC_ml, 0.5, na.rm = T)/1000) %>%
+  ggplot() +
+  geom_ribbon(aes(x = year_num, ymin = low, ymax = upp), alpha = 0.3, fill = dual_blues[2]) +
+  geom_line(aes(x = year_num, y =  med), colour = dual_blues[1]) +
+  facet_wrap(~quint, nrow = 1) +
+  theme_minimal() +
+  xlab('Year') +
+  ylab('SCC (x1000 cells per mL)') +
+  ylim(100, 300)
+  
+synergy_RF_unscaled %>%
+  mutate(quint = ntile(total_mgkg_esvac, 5)) %>%
+  select(year_num, premises_id, mu_SCC_ml, quint) %>%
+  group_by(year_num, quint) %>%
+  summarise(low = quantile(mu_SCC_ml, 0.25, na.rm = T)/1000,
+            upp = quantile(mu_SCC_ml, 0.75, na.rm = T)/1000,
+            med = quantile(mu_SCC_ml, 0.5, na.rm = T)/1000) %>%
+  mutate(iqr = upp-low) 
+  ggplot() +
+  geom_ribbon(aes(x = year_num, ymin = low, ymax = upp), alpha = 0.3, fill = dual_blues[2]) +
+  geom_line(aes(x = year_num, y =  med), colour = dual_blues[1]) +
+  theme_minimal() +
+  xlab('Year') +
+  ylab('SCC (x1000 cells per mL)') +
+  ylim(100, 300)
+```
+
+
+
+```{r, fig.width= 12, fig.height=3}
+quints <- synergy_RF_unscaled %>%
+  mutate(quint = ntile(total_mgkg_esvac, 5)) %>%
+  select(premises_id, year, quint)
+
+synergy_abs_mgkg_tidy_full_years %>%
+  filter(im_type == 'LCT') %>%
+  filter(denom_unit == 'tube') %>%
+  mutate(tubes_per_cow = (quantity * unit_correction) / (herd_av_kg/425),
+           year = as.numeric(year(year))) %>%
+  filter(!is.na(tubes_per_cow)) %>%
+  select(premises_id, year, tubes_per_cow) %>%
+  left_join(quints, by = c('year', 'premises_id')) %>%
+  filter(!is.na(quint)) %>%
+  group_by(year, quint) %>%
+  summarise(low = quantile(tubes_per_cow, 0.25, na.rm = T),
+            upp = quantile(tubes_per_cow, 0.75, na.rm = T),
+            med = quantile(tubes_per_cow, 0.5, na.rm = T)) 
+  ggplot() +
+  geom_ribbon(aes(x = year, ymin = low, ymax = upp), alpha = 0.3, fill = '#a17ccf' ) +
+  geom_line(aes(x = year, y =  med), colour = '#631db8') +
+  facet_wrap(~quint, nrow = 1) +
+  theme_minimal() +
+  xlab('Year') +
+  ylab('LC tubes per cow') 
+  
+  synergy_RF_unscaled
+  100,000
+
+```
+
+```{r, fig.width=10, fig.height = 3}
+synergy_RF_unscaled %>%
+  group_by(premises_id) %>%
+  summarise(yearly_use = mean(total_mgkg_esvac, na.rm = T)) %>%
+  mutate(quint = ntile(yearly_use, 5)) %>%
+  ggplot() +
+  geom_bar(aes(x = reorder(premises_id, yearly_use), y = yearly_use, fill = as.integer(quint)), stat = 'identity', colour = 'white', size = .1) +
+  theme_minimal() +
+  ylab('Mean annual mg/kg')
+```
+
+``````{r, fig.width=5, fig.height = 3}
+synergy_RF_unscaled %>%
+  ggplot() +
+  geom_histogram(aes(x = total_mgkg_esvac))
+
+synergy_RF_unscaled %>%
+  ggplot() +
+  geom_histogram(aes(x = total_mgkg_esvac), binwidth = 0.05,
+                 colour = 'white', size = 0.1, fill = dual_blues[1]) +
+  theme_minimal()+
+  scale_x_continuous(trans = 'log10') +
+  xlab('Annual mg/kg AM sales (log10)') +
+  ylab('Count')
+
+synergy_RF_unscaled %>%
+  ggplot() +
+  geom_histogram(aes(x = total_mgkg_per_L_esvac), binwidth = 0.05,
+                 colour = 'white', size = 0.1, , fill = dual_greens[1]) +
+  theme_minimal() +
+  scale_x_continuous(trans = 'log10')+
+  xlab('Annual mg/kg AM sales per kg milk produced (log10)') +
+  ylab('Count')
+
+ 
+
+```
+
+```{r}
+synergy_RF_unscaled %>%
+  select(premises_id, calving_pattern) %>%
+  distinct() %>%
+  count(calving_pattern) %>%
+  mutate(n/124)
+
+synergy_RF_unscaled %>%
+  filter(year_num == 2010) %>%
+  summarise_all(~median(., na.rm = T))
+  distinct()
+  
+  
+  337
+  418
+  
+  ssc 195, 174
+```
+
+```{r}
+synergy_RF_unscaled %>%
+  select(n_visits, herd_size, prop_herd_DCT, total_prod_per_cow.y, mu_parity,
+         mu_SCC_ml, max_summer_temp, min_winter_temp, ann_mean_rain) %>%
+  summarise_all(~quantile(., 0.025, na.rm = T))
+
+synergy_RF_unscaled %>%
+  count(premises_id, calving_pattern) %>%
+  count(calving_pattern)
+808 / 107
+125 /17
+
+synergy_RF_unscaled %>%
+  group_by(organic) %>%
+  summarise(quantile
+            (herd_size, 0.5))
+
+```
+

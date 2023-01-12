@@ -1,0 +1,920 @@
+---
+title: "Model building - temperature effect part C"
+output: html_notebook
+---
+
+Horseshoe prior model
+Aim: variable selection to see which temperature and humidity related variables are best
+
+Temperature - lags
+Humidity = lags
+Temp:humid interaction - lags
+Below freezing - lags
+Min temperature - lags
+Max temperature - lags
+
++ Spline outside of horseshoe 
+
+Plot - top variables - posterior dis and contours 
+Table with full results and FDR
+
+# Set-up
+```{r}
+library(tidyverse)
+library(brms)
+options(mc.cores = 8, brms.backend = "cmdstanr") # allows threading
+library(tryCatchLog)
+library(loo)
+library(lubridate)
+library(tidybayes)
+```
+
+# Paths
+```{r}
+datapath <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/rds_rda/modelling_uncertainty/data_with_locations/'
+savepath <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/rds_rda/final_models_new/'
+```
+
+
+# Reading in data
+```{r}
+df1_yard_amox <- readRDS(paste0(datapath, 'df1_yard_', 'amox', '_brms.Rds'))
+df1_shed_amox <- readRDS(paste0(datapath, 'df1_shed_', 'amox', '_brms.Rds'))
+df1_yard_ceph <- readRDS(paste0(datapath, 'df1_yard_', 'ceph', '_brms.Rds'))
+df1_shed_ceph <- readRDS(paste0(datapath, 'df1_shed_', 'ceph', '_brms.Rds'))
+df1_yard_cipro <- readRDS(paste0(datapath, 'df1_yard_', 'cipro', '_brms.Rds'))
+df1_shed_cipro <- readRDS(paste0(datapath, 'df1_shed_', 'cipro', '_brms.Rds'))
+df1_yard_strep <- readRDS(paste0(datapath, 'df1_yard_', 'strep', '_brms.Rds'))
+df1_shed_strep <- readRDS(paste0(datapath, 'df1_shed_', 'strep', '_brms.Rds'))
+df1_yard_tetra <- readRDS(paste0(datapath, 'df1_yard_', 'tetra', '_brms.Rds'))
+df1_shed_tetra <- readRDS(paste0(datapath, 'df1_shed_', 'tetra', '_brms.Rds'))
+
+```
+
+
+### Functions
+```{r}
+make_formula_horseshoe <- function(rf){
+  
+  count = 0
+  rf_formula <- ''
+  for (i in rf){
+    if (count == 0){
+      rf_formula <- paste(i)
+    }
+    if (count != 0) {
+      rf_formula <- paste(rf_formula, '+', i)
+    }
+    count = count + 1
+  }
+  
+  model_formula <- bf(count ~ main + am * log_inv_logit(riskfactors + re),nl=TRUE)
+  model_formula <- model_formula + lf(main ~ offset(log_dilution) + (1|assay)) 
+  model_formula <- model_formula + lf('re ~  1 + s(study_day_effect, bs ="gp") + (1|location_id) + (1|farm) + (1|assay)')
+  model_formula <- model_formula + lf(paste("riskfactors ~ ", rf_formula))
+  
+  return(model_formula)
+}
+
+run_possion_model_horseshoe <- function(data, model_formula, savepath, savename){
+    chain_length <- 4000
+    custom_priors_highvar <- c(
+      set_prior("horseshoe(1)", class= 'b', nlpar = 'riskfactors'), # horseshoe prior
+      set_prior('normal(0, 5)', class = 'b', nlpar = 'main'), # weak info prior
+      set_prior('normal(10, 1)', class = 'sd', nlpar = 're', group = 'assay'), # prevents this wide prior on 'true' random effects which we want with low var
+      set_prior('normal(10, 1)', class = 'sd', nlpar = 'main')# fix variance high using normal dist
+    )
+    
+  start_time <- Sys.time()
+  
+  options(mc.cores = 8, brms.backend = "cmdstanr") # allows threading
+
+  model <- brm(
+    formula = model_formula,
+    data = as.data.frame(data), 
+    family = poisson(), 
+    prior = custom_priors_highvar,
+    iter = chain_length, warmup = chain_length/2, chains = 4, cores = 4,
+    silent = T,
+    backend = "cmdstanr",
+    threads = threading(2) #8 cores used 
+    )
+  
+  end_time <- Sys.time()
+  print(end_time - start_time)
+  
+  saveRDS(model, paste0(savepath, savename))
+  
+  return(model)
+}
+
+run_non_horseshoe_model <- function(df, save_name){
+  model <- tryLog(run_possion_model(data = df,
+                  model_formula = make_formula_poisson_var('mean_week_humidity_S + mean_2week_humidity_S + mean_4week_humidity_S + below_freezing_1week + below_freezing_2week + below_freezing_4week + minimum_temperature_1week_S + maximum_temperature_1week_S + mean_week_temperature_S + mean_2week_temperature_S + mean_4week_temperature_S + mean_week_temperature_S * mean_week_humidity_S + mean_2week_temperature_S * mean_2week_humidity_S + mean_4week_temperature_S * mean_4week_humidity_S + s(study_day_effect, bs ="gp") + (1|location_id) + (1|farm) + (1|assay)'),
+                  savepath,
+                  savename = paste0('non_horseshoe_model', save_name, '.Rds'),
+                  chain_length = 4000))
+  return(summary(model))
+  rm(model)
+}
+
+run_non_horseshoe_model(df1_yard_ceph, 'yard_ceph')
+```
+
+### Running horseshoe prior model
+```{r}
+rf_list <- c(
+  'mean_week_humidity_S',
+  'mean_2week_humidity_S',
+  'mean_4week_humidity_S',
+  'below_freezing_1week',
+  'below_freezing_2week',
+  'below_freezing_4week',
+  'minimum_temperature_1week_S',
+  'maximum_temperature_1week_S',
+  'mean_week_temperature_S',
+  'mean_2week_temperature_S',
+  'mean_4week_temperature_S',
+  'mean_week_temperature_S*mean_week_humidity_S',
+  'mean_2week_temperature_S*mean_2week_humidity_S',
+  'mean_4week_temperature_S*mean_4week_humidity_S')
+
+rf<- make_formula_horseshoe(rf_list)
+rf
+rf_list
+# Amox
+
+run_horseshoe <- function(df, name, rf_formula){
+  horseshoe_model <- tryLog(
+                            run_possion_model_horseshoe(
+                              data = df,
+                              model_formula = rf_formula,
+                              savepath, savename = paste0('horseshoe_C1_', name, '.Rds')))
+  
+  summary(horseshoe_model)
+  rm(horseshoe_model)
+}
+
+
+
+run_horseshoe(df1_yard_amox, 'yard_amox', rf)
+run_horseshoe(df1_shed_amox, 'shed_amox', rf)
+
+run_horseshoe(df1_yard_ceph, 'yard_ceph', rf)
+run_horseshoe(df1_shed_ceph, 'shed_ceph', rf)
+
+run_horseshoe(df1_yard_strep, 'yard_strep', rf)
+run_horseshoe(df1_shed_strep, 'shed_strep', rf)
+
+run_horseshoe(df1_yard_tetra, 'yard_tetra', rf)
+run_horseshoe(df1_shed_tetra, 'shed_tetra', rf)
+
+
+```
+
+
+### Read in models
+```{r}
+amox_yardhorseshoe_C1 <- readRDS(paste0(savepath, 'horseshoe_C1_yard_amox.rds'))
+amox_shedhorseshoe_C1 <- readRDS(paste0(savepath, 'horseshoe_C1_shed_amox.rds'))
+ceph_yardhorseshoe_C1 <- readRDS(paste0(savepath, 'horseshoe_C1_yard_ceph.Rds'))
+ceph_shedhorseshoe_C1 <- readRDS(paste0(savepath, 'horseshoe_C1_shed_ceph.Rds'))
+strep_yardhorseshoe_C1 <- readRDS(paste0(savepath, 'horseshoe_C1_yard_strep.Rds'))
+strep_shedhorseshoe_C1 <- readRDS(paste0(savepath, 'horseshoe_C1_shed_strep.Rds'))
+tetra_yardhorseshoe_C1 <- readRDS(paste0(savepath, 'horseshoe_C1_yard_tetra.Rds'))
+tetra_shedhorseshoe_C1 <- readRDS(paste0(savepath, 'horseshoe_C1_shed_tetra.Rds'))
+
+summary(amox_yardhorseshoe_C1)
+summary(tetra_shedhorseshoe_C1)
+```
+
+```{r, fig.height = 6, fig.width = 5}
+median_and_CIs <- function(data){
+  med <- as.character(round(median(data), 3))
+  upp <- as.character(round(quantile(data, 0.975), 3))
+  low <- as.character(round(quantile(data, 0.025), 3))
+  sig <- ' '
+  if((upp > 0 & low > 0) | (upp < 0 & low < 0) ){
+    sig <- '*'
+  }
+  
+  return(paste0(med, ' (', low, ', ', upp, ')  ', sig))
+}
+
+get_fdr <- function(model, am, location){
+  res <- model %>%
+    spread_draws(`b_riskfactors.*`, regex = T) %>%
+    select(-.chain, -.iteration, -.draw, -b_riskfactors_Intercept) %>%
+    gather(key = 'variable', value = 'estimate') %>%
+    mutate(variable = gsub('b_riskfactors.', '', variable),
+           estimate_grouped = ifelse(estimate > 0, 1, 0))
+  
+  fdr_res <- res %>%
+    group_by(variable) %>%
+    summarise(prop_estimate = mean(estimate_grouped),
+              fdr = ifelse(prop_estimate < 0.5, prop_estimate, 1-prop_estimate),
+              coef_estimate = median_and_CIs(estimate),
+              med = median(estimate),
+              low = quantile(estimate, 0.025),
+              upp =  quantile(estimate, 0.975)) %>%
+    arrange(fdr) %>%
+    mutate(global_fdr = cummean(fdr),
+           am = as.factor(am),
+           location = as.factor(location))
+  
+  return(fdr_res)
+}
+
+get_draws_and_fdr <- function(model, am, location){
+  res <- model %>%
+    spread_draws(`b_riskfactors.*`, regex = T) %>%
+    select(-.chain, -.iteration, -.draw, -b_riskfactors_Intercept) %>%
+    gather(key = 'variable', value = 'estimate') %>%
+    mutate(variable = as.factor(gsub('b_riskfactors.', '', variable)),
+           estimate_grouped = ifelse(estimate > 0, 1, 0))
+  
+  fdr <- res %>%
+    group_by(variable) %>%
+    summarise(prop_estimate = mean(estimate_grouped),
+              fdr = ifelse(prop_estimate < 0.5, prop_estimate, 1-prop_estimate)) %>%
+    arrange(fdr) %>%
+    mutate(global_fdr = cummean(fdr),
+           am = as.factor(am),
+           location = as.factor(location))
+  
+  res_and_fdr <- res %>%
+    left_join(fdr, by = 'variable')
+  
+  return(res_and_fdr)
+}
+
+all_fdr <- rbind(get_fdr(amox_yardhorseshoe_C1, 'amox', 'yard'),
+                 get_fdr(amox_shedhorseshoe_C1, 'amox', 'shed'),
+                  get_fdr(ceph_yardhorseshoe_C1, 'ceph', 'yard'),
+                  get_fdr(ceph_shedhorseshoe_C1, 'ceph', 'shed'),
+                 get_fdr(strep_yardhorseshoe_C1, 'strep', 'yard'),
+                 get_fdr(strep_shedhorseshoe_C1, 'strep', 'shed'),
+                 get_fdr(tetra_yardhorseshoe_C1, 'tetra', 'yard'),
+                 get_fdr(tetra_shedhorseshoe_C1, 'tetra', 'shed'))
+all_fdr
+get_fdr(strep_shedhorseshoe_C1, 'strep', 'shed')
+
+fdr_res_table <- all_fdr %>%
+  mutate(prop_estimate = round(prop_estimate, 3),
+         fdr  = round(fdr, 3),
+         global_fdr  = round(global_fdr, 3))
+
+write.csv(fdr_res_table, paste0(savepath, 'fdr_horseshoe_model.csv'))
+
+plot_horseshoe_results <- function(model, am_name, am_name_full, location_name, location_name_full, cutoff, n){
+  
+  model_fdr_draws <- get_draws_and_fdr(model, am_name, location_name)
+  
+  top5 <- as.character(get_fdr(model, am_name, location_name)$variable[1:n])
+  
+  model_fdr_draws <- model_fdr_draws %>%
+    filter(variable %in% c(top5))
+  
+  levels(model_fdr_draws$variable) <- c('Freezing (7)', 'Freezing (14)', 'Freezing (28)',
+                                        'Maximum temp.', 'Humidity (14)', 'Interaction (14)',
+                                        'Temp. (14)', 'Humidity (28)', 'Interaction (28)',
+                                        'Temp. (28)', 'Humidity (7)', 'Interaction (7)',
+                                        'Temp. (7)', 'Minimum temp.')
+  
+    
+  model_fdr_draws <- model_fdr_draws %>%
+    mutate(fdr_sig = ifelse(global_fdr < cutoff, 'sig', 'no_sig'),
+           variable = as.character(variable)) %>%
+    arrange(-global_fdr)
+  
+  model_fdr_draws %>%
+    ggplot() +
+    stat_halfeye(aes(x = estimate, y = reorder(variable, -global_fdr), fill = fdr_sig), color = 'black') +
+    geom_vline(aes(xintercept = 0), linetype = 2, colour = 'grey') +
+    theme_minimal() +
+    xlab('Coefficient estimate') +
+    ylab('Predictor (ordered by FDR)') +
+    scale_colour_manual(values = c(dual_blues[2], dual_greens[2])) +
+    scale_fill_manual(values = c(dual_blues[2], dual_greens[2]), name = 'Global FDR',
+                      labels = c(paste0('>=', as.character(cutoff)), paste0('<', as.character(cutoff)))) +
+    ggtitle(paste0(am_name_full, ': ', location_name_full)) 
+
+}
+
+
+plot_non_horseshoe_results <- function(model, am_name, am_name_full, location_name, location_name_full, cutoff, n){
+  
+  model_fdr_draws <- get_draws_and_fdr_non_HS(model, am_name, location_name)
+  
+  top5 <- as.character(get_fdr_non_HS(model, am_name, location_name)$variable[1:n])
+  
+  model_fdr_draws <- model_fdr_draws %>%
+    filter(variable %in% c(top5))
+  
+  levels(model_fdr_draws$variable) <- c('Freezing (7)', 'Freezing (14)', 'Freezing (28)',
+                                        'Maximum temp.', 'Humidity (14)', 'Interaction (14)',
+                                        'Temp. (14)', 'Humidity (28)', 'Interaction (28)',
+                                        'Temp. (28)', 'Humidity (7)', 'Interaction (7)',
+                                        'Temp. (7)', 'Minimum temp.')
+  
+    
+  model_fdr_draws <- model_fdr_draws %>%
+    mutate(fdr_sig = ifelse(global_fdr < cutoff, 'sig', 'no_sig'),
+           variable = as.character(variable)) %>%
+    arrange(-global_fdr)
+  
+  model_fdr_draws %>%
+    ggplot() +
+    stat_halfeye(aes(x = estimate, y = reorder(variable, -global_fdr), fill = fdr_sig), color = 'black') +
+    geom_vline(aes(xintercept = 0), linetype = 2, colour = 'grey') +
+    theme_minimal() +
+    xlab('Coefficient estimate') +
+    ylab('Predictor (ordered by FDR)') +
+    scale_colour_manual(values = c(dual_blues[2], dual_greens[2])) +
+    scale_fill_manual(values = c(dual_blues[2], dual_greens[2]), name = 'Global FDR',
+                      labels = c(paste0('>=', as.character(cutoff)), paste0('<', as.character(cutoff)))) +
+    ggtitle(paste0(am_name_full, ': ', location_name_full)) 
+
+}
+
+
+get_draws_and_fdr_non_HS <- function(model, am, location){
+  res <- model %>%
+    spread_draws(`b_interaction.*`, regex = T) %>%
+    select(-.chain, -.iteration, -.draw, -b_interaction_Intercept) %>%
+    gather(key = 'variable', value = 'estimate') %>%
+    mutate(variable = as.factor(gsub('b_riskfactors.', '', variable)),
+           estimate_grouped = ifelse(estimate > 0, 1, 0))
+  
+  fdr <- res %>%
+    group_by(variable) %>%
+    summarise(prop_estimate = mean(estimate_grouped),
+              fdr = ifelse(prop_estimate < 0.5, prop_estimate, 1-prop_estimate)) %>%
+    arrange(fdr) %>%
+    mutate(global_fdr = cummean(fdr),
+           am = as.factor(am),
+           location = as.factor(location))
+  
+  res_and_fdr <- res %>%
+    left_join(fdr, by = 'variable')
+  
+  return(res_and_fdr)
+}
+
+
+get_fdr_non_HS <- function(model, am, location){
+  res <- model %>%
+    spread_draws(`b_interaction.*`, regex = T) %>%
+    select(-.chain, -.iteration, -.draw, -b_interaction_Intercept) %>%
+    gather(key = 'variable', value = 'estimate') %>%
+    mutate(variable = gsub('b_riskfactors.', '', variable),
+           estimate_grouped = ifelse(estimate > 0, 1, 0))
+  
+  fdr_res <- res %>%
+    group_by(variable) %>%
+    summarise(prop_estimate = mean(estimate_grouped),
+              fdr = ifelse(prop_estimate < 0.5, prop_estimate, 1-prop_estimate),
+              coef_estimate = median_and_CIs(estimate),
+              med = median(estimate),
+              low = quantile(estimate, 0.025),
+              upp =  quantile(estimate, 0.975)) %>%
+    arrange(fdr) %>%
+    mutate(global_fdr = cummean(fdr),
+           am = as.factor(am),
+           location = as.factor(location))
+  
+  return(fdr_res)
+}
+```
+
+```{r, fig.height = 6, fig.width = 6}
+
+
+plot_horseshoe_results(readRDS(paste0(savepath, 'horseshoe_C1_yard_amox.rds')), 'amox', 'Amoxicillin', 'yard', 'Adults in collecting yard', cutoff = 0.1, 5)
+plot_horseshoe_results(readRDS(paste0(savepath, 'horseshoe_C1_shed_amox.rds')), 'amox', 'Amoxicillin', 'shed', 'Heifers in sheds/pens', cutoff = 0.1, 5)
+plot_horseshoe_results(readRDS(paste0(savepath, 'horseshoe_C1_yard_ceph.Rds')), 'ceph', 'Cephalexin', 'shed', 'Adults in collecting yard', cutoff = 0.1, 5)
+plot_horseshoe_results(readRDS(paste0(savepath, 'horseshoe_C1_shed_ceph.Rds')), 'ceph', 'Cephalexin', 'yard', 'Heifers in sheds/pens', cutoff = 0.1, 5)
+plot_horseshoe_results(readRDS(paste0(savepath, 'horseshoe_C1_yard_strep.Rds')), 'strep', 'Streptomycin', 'shed', 'Adults in collecting yard', cutoff = 0.1, 5)
+plot_horseshoe_results(readRDS(paste0(savepath, 'horseshoe_C1_shed_strep.Rds')), 'strep', 'Streptomycin', 'yard', 'Heifers in sheds/pens', cutoff = 0.1, 10)
+plot_horseshoe_results(readRDS(paste0(savepath, 'horseshoe_C1_yard_tetra.Rds')), 'tetra', 'Tetracycline', 'shed', 'Adults in collecting yard', cutoff = 0.1, 5)
+plot_horseshoe_results(readRDS(paste0(savepath, 'horseshoe_C1_shed_tetra.Rds')), 'strep', 'Tetracycline', 'yard', 'Heifers in sheds/pens', cutoff = 0.1, 5)
+
+non_horseshoe <-readRDS(paste0(savepath, 'non_horseshoe_modelyard_ceph.Rds'))
+plot_non_horseshoe_results(non_horseshoe, 'ceph', 'Non-HS: Cephalexin', 'yard', 'Adults in collecting yard', cutoff = 0.1, 14)
+plot_horseshoe_results(readRDS(paste0(savepath, 'horseshoe_C1_yard_ceph.rds')), 'ceph', 'Cephalexin', 'yard', 'Adults in collecting yard', cutoff = 0.1, 14)
+
+get_variables(non_horseshoe)
+
+```
+
+```{r, fig.height =5, fig.width= 6}
+  #values = c('Amoxicillin' = "#0CC6DE", 'Cephalexin' = "#024731",  'Ciprofloxacin' = "#34B233", 'Streptomycin' ="#002F5F", 'Tetracycline' ='#9672b5')) +
+
+plot_horseshoe_contours(readRDS(paste0(savepath, 'horseshoe_C1_yard_amox.rds')), 'amox', 'yard', n =3, '#0CC6DE')
+plot_horseshoe_contours(readRDS(paste0(savepath, 'horseshoe_C1_shed_amox.rds')), 'amox',  'shed', n = 3, '#0CC6DE')
+
+plot_horseshoe_contours(readRDS(paste0(savepath, 'horseshoe_C1_yard_ceph.Rds')), 'ceph',  'shed',  n = 4, '#34B233')
+plot_horseshoe_contours(readRDS(paste0(savepath, 'horseshoe_C1_shed_ceph.Rds')), 'ceph',  'yard',  n = 3, '#34B233')
+
+plot_horseshoe_contours(readRDS(paste0(savepath, 'horseshoe_C1_yard_strep.Rds')), 'strep',  'shed',  n = 3,'#002F5F')
+#plot_horseshoe_contours(readRDS(paste0(savepath, 'horseshoe_C1_shed_strep.Rds')), 'strep', 'yard',  n = 5, '#002F5F')
+
+plot_horseshoe_contours(readRDS(paste0(savepath, 'horseshoe_C1_yard_tetra.Rds')), 'tetra',  'shed',  n = 3, '#9672b5')
+plot_horseshoe_contours(readRDS(paste0(savepath, 'horseshoe_C1_shed_tetra.Rds')), 'strep',  'yard',  n = 3, '#9672b5')
+
+
+p1 <-plot_horseshoe_contours_NON_HS(readRDS(paste0(savepath, 'non_horseshoe_modelyard_ceph.Rds')), 'ceph',  'yard',  n = 5, '#024731')
+p2 <-plot_horseshoe_contours(readRDS(paste0(savepath, 'horseshoe_C1_shed_ceph.Rds')), 'ceph',  'yard',  n = 5, '#34B233')
+
+p1
+p2
+
+```
+
+```{r}
+plot_spline_day_of_study <- function(model, data, no_bacs, am_name, location_name, colour_code, min_date, max_date){
+    
+  n <- 100
+  seq_day_in_study <- seq(0,1,(1/(n-1)))
+  
+  dummy_data <- tibble(
+    x_val = rep(paste0('V', as.character(seq(1,n))), 2)) %>%
+    mutate(am = c(rep(0, n), rep(1, n)),
+           log_dilution = c(rep(log(0.1),n), rep(0, n)),
+           mean_week_temperature_S = 0,
+           mean_2week_temperature_S = 0,
+           mean_4week_temperature_S = 0,
+           mean_week_humidity_S = 0,
+           mean_2week_humidity_S = 0,
+           mean_4week_humidity_S = 0,
+           below_freezing_1week = 0.5,
+           below_freezing_2week = 0.5,
+           below_freezing_4week = 0.5,
+           minimum_temperature_1week_S = 0,
+           maximum_temperature_1week_S = 0,
+           study_day_effect = rep(seq_day_in_study, 2),
+           farm = NA,
+           assay = NA,
+           location_id = NA)
+  
+  estimates <- as_tibble(inv_logit_scaled(fitted(model,
+                      newdata = dummy_data,
+                      re_formula = NA,
+                      nlpar = 're')))
+  
+  assays <- as_tibble(inv_logit_scaled(fitted(model,
+                      re_formula = NULL,
+                      nlpar = 're')))
+  
+  names(assays) <- paste0('assay_', names(assays))
+  
+  n_days <- as.numeric(max(data$date) - min(data$date))
+  
+  assays_ests <- cbind(assays, model$data) %>%
+    filter(am == 0) %>%
+    mutate(date = min(data$date) + study_day_effect*n_days)
+
+  res <- cbind(estimates, dummy_data) %>%
+    filter(am == 0) %>%
+    filter(study_day_effect > min(assays_ests$study_day_effect) & study_day_effect < max(assays_ests$study_day_effect)) %>%
+    mutate(date = min(data$date) + study_day_effect*n_days)
+  
+  diff <- (min(res$Estimate)) /median(assays_ests$assay_Estimate) # no intercept, so adjust spline to median
+
+  spline_plot <- res %>%
+    ggplot() +
+    geom_point(data = no_bacs, aes(y = min(assays_ests$assay_Estimate), x = date), alpha = 0.5, colour = 'red', shape = 18, size = 2.5) +
+    geom_point(data = assays_ests, aes(y = assay_Estimate, x = date), alpha = 0.3, colour = 'grey') +
+    geom_line(aes(x = date, y = Estimate/diff), colour = colour_code, size = 1.5) +
+    geom_ribbon(aes(x =  date, ymin = Q2.5/diff, ymax = Q97.5/diff), alpha = 0.5, fill = colour_code) +
+    scale_y_continuous(trans = 'log10') +
+    xlab('Date') +
+    ylab('Estimated proportion resistant') +
+    theme_minimal() +
+    ggtitle(paste0(am_name, ': ', location_name))
+  
+  return(spline_plot)
+  
+}
+
+names(amox_yardhorseshoe_C1$data)
+```
+
+
+
+
+```{r}
+no_bac_yard <- readRDS(paste0(datapath, 'df1_no_bac_yard.Rds'))
+no_bac_shed <- readRDS(paste0(datapath, 'df1_no_bac_shed.Rds'))
+
+df1_yard_amox <- readRDS(paste0(datapath, 'df1_yard_', 'amox', '_brms.Rds'))
+df1_shed_amox <- readRDS(paste0(datapath, 'df1_shed_', 'amox', '_brms.Rds'))
+df1_yard_ceph <- readRDS(paste0(datapath, 'df1_yard_', 'ceph', '_brms.Rds'))
+df1_shed_ceph <- readRDS(paste0(datapath, 'df1_shed_', 'ceph', '_brms.Rds'))
+df1_yard_strep <- readRDS(paste0(datapath, 'df1_yard_', 'strep', '_brms.Rds'))
+df1_shed_strep <- readRDS(paste0(datapath, 'df1_shed_', 'strep', '_brms.Rds'))
+df1_yard_tetra <- readRDS(paste0(datapath, 'df1_yard_', 'tetra', '_brms.Rds'))
+df1_shed_tetra <- readRDS(paste0(datapath, 'df1_shed_', 'tetra', '_brms.Rds'))
+
+all_data <- rbind(df1_yard_amox, df1_shed_amox)
+min_date <- min(all_data$date)
+max_date <- max(all_data$date)
+
+p_amox_yard <- plot_spline_day_of_study(readRDS(paste0(savepath, 'horseshoe_C1_yard_amox.rds')),
+                         df1_yard_amox, no_bac_yard, 'Amoxicillin', 'Adults in collecting yard', '#0CC6DE',
+                         min_date, max_date)
+
+
+
+p_amox_shed <- plot_spline_day_of_study(readRDS(paste0(savepath, 'horseshoe_C1_shed_amox.rds')),
+                         df1_yard_amox, no_bac_shed, 'Amoxicillin', 'Heifers in sheds/pens', '#0CC6DE',
+                         min_date, max_date)
+
+p_ceph_yard <- plot_spline_day_of_study(readRDS(paste0(savepath, 'horseshoe_C1_yard_ceph.rds')),
+                         df1_yard_amox, no_bac_yard, 'Cephalexin', 'Adults in collecting yard', '#34B233',
+                         min_date, max_date)
+
+p_ceph_shed <- plot_spline_day_of_study(readRDS(paste0(savepath, 'horseshoe_C1_shed_ceph.rds')),
+                         df1_yard_amox, no_bac_shed, 'Cephalexin', 'Heifers in sheds/pens', '#34B233',
+                         min_date, max_date)
+
+p_strep_yard <- plot_spline_day_of_study(readRDS(paste0(savepath, 'horseshoe_C1_yard_strep.rds')),
+                         df1_yard_amox, no_bac_yard, 'Streptomycin', 'Adults in collecting yard', '#002F5F',
+                         min_date, max_date)
+
+p_strep_shed <- plot_spline_day_of_study(readRDS(paste0(savepath, 'horseshoe_C1_shed_strep.rds')),
+                         df1_yard_amox, no_bac_shed, 'Streptomycin', 'Heifers in sheds/pens', '#002F5F',
+                         min_date, max_date)
+
+
+p_tetra_yard <- plot_spline_day_of_study(readRDS(paste0(savepath, 'horseshoe_C1_yard_tetra.rds')),
+                         df1_yard_amox, no_bac_yard, 'Tetracycline', 'Adults in collecting yard', '#9672b5',
+                         min_date, max_date)
+
+p_tetra_shed <- plot_spline_day_of_study(readRDS(paste0(savepath, 'horseshoe_C1_shed_tetra.rds')),
+                         df1_yard_amox, no_bac_shed, 'Tetracycline', 'Heifers in sheds/pens', '#9672b5',
+                         min_date, max_date)
+```
+
+```{r, fig.width = 5, fig.height = 4}
+p_amox_yard
+p_amox_shed
+
+p_ceph_yard
+p_ceph_shed
+
+p_strep_yard
+p_strep_shed
+
+p_tetra_yard
+p_tetra_shed
+```
+
+
+```{r, fig.width = 5, fig.height = 5}
+
+plot_horseshoe_contours <- function(model, am_name, location_name, n, colour_code) {
+  
+  fdr <- get_fdr(model, am_name, location_name)
+  top <- as.character(fdr$variable[1:n])
+  
+  just_fdr <- fdr %>%
+    filter(variable %in% top) %>%
+    mutate(variable_name = paste0('var_', seq(1,n))) %>%
+    select(variable, variable_name, fdr)
+   
+  all_draws <- model %>%
+    spread_draws(`b_riskfactors.*`, regex = T) %>%
+    select(-.chain, -.iteration, -.draw) %>%
+    gather(key = 'variable', value ='estimate') %>%
+    mutate(variable = gsub('b_riskfactors_', '', variable)) %>%
+    left_join(just_fdr, by = 'variable') %>%
+    filter(!is.na(variable_name)) %>%
+    mutate(variable_name = as.factor(variable_name)) %>%
+    select(-variable, - fdr)
+  
+  all_draws <- all_draws %>%
+    mutate(id = rep(seq(1, 8000), n)) %>%
+    spread(key = 'variable_name', value = 'estimate')
+  
+  p_blank <- ggplot() +
+    theme_minimal()
+  
+  p1 <- all_draws %>%
+    ggplot() +
+    geom_density_2d(aes(y = var_1, x = var_2), colour = colour_code) +
+    geom_vline(aes(xintercept = 0),  colour = 'darkgrey') +
+    geom_hline(aes(yintercept = 0),  colour = 'darkgrey') +
+    theme_minimal() +
+    xlab('') +
+    ylab('')
+  
+  p2 <- all_draws %>%
+    ggplot() +
+    geom_density_2d(aes(y = var_1, x = var_3), colour = colour_code) +
+    geom_vline(aes(xintercept = 0),  colour = 'darkgrey') +
+    geom_hline(aes(yintercept = 0),  colour = 'darkgrey') +
+    theme_minimal() +
+    xlab('') +
+    ylab('')
+  
+  if (n >= 4){
+  p3 <- all_draws %>%
+    ggplot() +
+    geom_density_2d(aes(y = var_1, x = var_4), colour = colour_code) +
+    geom_vline(aes(xintercept = 0),  colour = 'darkgrey') +
+    geom_hline(aes(yintercept = 0),  colour = 'darkgrey') +
+    theme_minimal() +
+    xlab('') +
+    ylab('')
+  } else{
+    p3 <- p_blank
+  }
+  
+  if (n >= 5){
+    p4 <- all_draws %>%
+      ggplot() +
+      geom_density_2d(aes(y = var_1, x = var_5), colour = colour_code) +
+    geom_vline(aes(xintercept = 0),  colour = 'darkgrey') +
+    geom_hline(aes(yintercept = 0),  colour = 'darkgrey') +
+      theme_minimal() +
+      xlab('') +
+      ylab('')
+  }else{
+      p4 <- p_blank
+  }
+  
+  
+  p5 <- all_draws %>%
+      ggplot() +
+      geom_density_2d(aes(y = var_2, x = var_3), colour = colour_code) +
+      geom_vline(aes(xintercept = 0),  colour = 'darkgrey') +
+      geom_hline(aes(yintercept = 0),  colour = 'darkgrey') +
+      theme_minimal() +
+      xlab('') +
+      ylab('')
+  
+  
+  if (n >= 4){
+    p6 <- all_draws %>%
+      ggplot() +
+      geom_density_2d(aes(y = var_2, x = var_4), colour = colour_code) +
+      geom_vline(aes(xintercept = 0),  colour = 'darkgrey') +
+      geom_hline(aes(yintercept = 0),  colour = 'darkgrey') +
+      theme_minimal() +
+      xlab('') +
+      ylab('')
+    }else{
+      p6 <- p_blank
+  }
+    
+  if (n >= 5){
+    p7 <- all_draws %>%
+      ggplot() +
+      geom_density_2d(aes(y = var_2, x = var_5), colour = colour_code) +
+      geom_vline(aes(xintercept = 0),  colour = 'darkgrey') +
+      geom_hline(aes(yintercept = 0),  colour = 'darkgrey') +
+      theme_minimal() +
+      xlab('') +
+      ylab('')
+  }else{
+      p7 <- p_blank
+  }
+  
+  if (n >= 4){  
+    p8 <- all_draws %>%
+      ggplot() +
+      geom_density_2d(aes(y = var_3, x = var_4), colour = colour_code) +
+      geom_vline(aes(xintercept = 0),  colour = 'darkgrey') +
+      geom_hline(aes(yintercept = 0),  colour = 'darkgrey') +
+      theme_minimal() +
+      xlab('') +
+      ylab('')
+  }else{
+      p8 <- p_blank
+  }
+     
+  if (n >= 5){ 
+    p9 <- all_draws %>%
+      ggplot() +
+      geom_density_2d(aes(y = var_3, x =  var_5), colour = colour_code) +
+      geom_vline(aes(xintercept = 0),  colour = 'darkgrey') +
+      geom_hline(aes(yintercept = 0),  colour = 'darkgrey') +
+      theme_minimal() +
+      xlab('') +
+      ylab('')
+  }else{
+      p9 <- p_blank
+  }    
+  
+  if (n >= 5){
+    p10 <-  all_draws %>%
+      ggplot() +
+      geom_density_2d(aes(y = var_4, x = var_5), colour = colour_code) +
+      geom_vline(aes(xintercept = 0),  colour = 'darkgrey') +
+      geom_hline(aes(yintercept = 0),  colour = 'darkgrey') +
+      theme_minimal() +
+      xlab('') +
+      ylab('')
+  }else{
+      p10 <- p_blank
+  }
+  
+  if(n == 3){
+    gridExtra::grid.arrange(p1, p2,
+                            p_blank, p5, 
+                            nrow = 2)
+  }
+  
+  if(n == 4){
+    gridExtra::grid.arrange(p1, p2, p3,
+                          p_blank, p5, p6,
+                          p_blank, p_blank, p8,
+                          nrow = 3)
+  }
+  
+  if(n == 5){
+    gridExtra::grid.arrange(p1, p2, p3, p4,
+                          p_blank, p5, p6, p7,
+                          p_blank, p_blank, p8, p9,
+                          p_blank,p_blank,p_blank,p10,
+                          nrow = 4)
+  }
+  
+}
+#values = c('Amoxicillin' = "#0CC6DE", 'Cephalexin' = "#024731",  'Ciprofloxacin' = "#34B233", 'Streptomycin' ="#002F5F", 'Tetracycline' ='#9672b5')) +
+
+
+plot_horseshoe_contours_NON_HS <- function(model, am_name, location_name, n, colour_code) {
+  
+  fdr <- get_fdr_non_HS(model, am_name, location_name)
+  top <- as.character(fdr$variable[1:n])
+  
+  just_fdr <- fdr %>%
+    filter(variable %in% top) %>%
+    mutate(variable_name = paste0('var_', seq(1,n))) %>%
+    select(variable, variable_name, fdr)
+   
+  all_draws <- model %>%
+    spread_draws(`b_interaction.*`, regex = T) %>%
+    select(-.chain, -.iteration, -.draw, -b_interaction_Intercept) %>%
+    gather(key = 'variable', value ='estimate') %>%
+    mutate(variable = gsub('b_riskfactors_', '', variable)) %>%
+    left_join(just_fdr, by = 'variable') %>%
+    filter(!is.na(variable_name)) %>%
+    mutate(variable_name = as.factor(variable_name)) %>%
+    select(-variable, - fdr)
+  
+  all_draws <- all_draws %>%
+    mutate(id = rep(seq(1, 8000), n)) %>%
+    spread(key = 'variable_name', value = 'estimate')
+  
+  p_blank <- ggplot() +
+    theme_minimal()
+  
+  p1 <- all_draws %>%
+    ggplot() +
+    geom_density_2d(aes(y = var_1, x = var_2), colour = colour_code) +
+    geom_vline(aes(xintercept = 0),  colour = 'darkgrey') +
+    geom_hline(aes(yintercept = 0),  colour = 'darkgrey') +
+    theme_minimal() +
+    xlab('') +
+    ylab('')
+  
+  p2 <- all_draws %>%
+    ggplot() +
+    geom_density_2d(aes(y = var_1, x = var_3), colour = colour_code) +
+    geom_vline(aes(xintercept = 0),  colour = 'darkgrey') +
+    geom_hline(aes(yintercept = 0),  colour = 'darkgrey') +
+    theme_minimal() +
+    xlab('') +
+    ylab('')
+  
+  if (n >= 4){
+  p3 <- all_draws %>%
+    ggplot() +
+    geom_density_2d(aes(y = var_1, x = var_4), colour = colour_code) +
+    geom_vline(aes(xintercept = 0),  colour = 'darkgrey') +
+    geom_hline(aes(yintercept = 0),  colour = 'darkgrey') +
+    theme_minimal() +
+    xlab('') +
+    ylab('')
+  } else{
+    p3 <- p_blank
+  }
+  
+  if (n >= 5){
+    p4 <- all_draws %>%
+      ggplot() +
+      geom_density_2d(aes(y = var_1, x = var_5), colour = colour_code) +
+    geom_vline(aes(xintercept = 0),  colour = 'darkgrey') +
+    geom_hline(aes(yintercept = 0),  colour = 'darkgrey') +
+      theme_minimal() +
+      xlab('') +
+      ylab('')
+  }else{
+      p4 <- p_blank
+  }
+  
+  
+  p5 <- all_draws %>%
+      ggplot() +
+      geom_density_2d(aes(y = var_2, x = var_3), colour = colour_code) +
+      geom_vline(aes(xintercept = 0),  colour = 'darkgrey') +
+      geom_hline(aes(yintercept = 0),  colour = 'darkgrey') +
+      theme_minimal() +
+      xlab('') +
+      ylab('')
+  
+  
+  if (n >= 4){
+    p6 <- all_draws %>%
+      ggplot() +
+      geom_density_2d(aes(y = var_2, x = var_4), colour = colour_code) +
+      geom_vline(aes(xintercept = 0),  colour = 'darkgrey') +
+      geom_hline(aes(yintercept = 0),  colour = 'darkgrey') +
+      theme_minimal() +
+      xlab('') +
+      ylab('')
+    }else{
+      p6 <- p_blank
+  }
+    
+  if (n >= 5){
+    p7 <- all_draws %>%
+      ggplot() +
+      geom_density_2d(aes(y = var_2, x = var_5), colour = colour_code) +
+      geom_vline(aes(xintercept = 0),  colour = 'darkgrey') +
+      geom_hline(aes(yintercept = 0),  colour = 'darkgrey') +
+      theme_minimal() +
+      xlab('') +
+      ylab('')
+  }else{
+      p7 <- p_blank
+  }
+  
+  if (n >= 4){  
+    p8 <- all_draws %>%
+      ggplot() +
+      geom_density_2d(aes(y = var_3, x = var_4), colour = colour_code) +
+      geom_vline(aes(xintercept = 0),  colour = 'darkgrey') +
+      geom_hline(aes(yintercept = 0),  colour = 'darkgrey') +
+      theme_minimal() +
+      xlab('') +
+      ylab('')
+  }else{
+      p8 <- p_blank
+  }
+     
+  if (n >= 5){ 
+    p9 <- all_draws %>%
+      ggplot() +
+      geom_density_2d(aes(y = var_3, x =  var_5), colour = colour_code) +
+      geom_vline(aes(xintercept = 0),  colour = 'darkgrey') +
+      geom_hline(aes(yintercept = 0),  colour = 'darkgrey') +
+      theme_minimal() +
+      xlab('') +
+      ylab('')
+  }else{
+      p9 <- p_blank
+  }    
+  
+  if (n >= 5){
+    p10 <-  all_draws %>%
+      ggplot() +
+      geom_density_2d(aes(y = var_4, x = var_5), colour = colour_code) +
+      geom_vline(aes(xintercept = 0),  colour = 'darkgrey') +
+      geom_hline(aes(yintercept = 0),  colour = 'darkgrey') +
+      theme_minimal() +
+      xlab('') +
+      ylab('')
+  }else{
+      p10 <- p_blank
+  }
+  
+  if(n == 3){
+    gridExtra::grid.arrange(p1, p2,
+                            p_blank, p5, 
+                            nrow = 2)
+  }
+  
+  if(n == 4){
+    gridExtra::grid.arrange(p1, p2, p3,
+                          p_blank, p5, p6,
+                          p_blank, p_blank, p8,
+                          nrow = 3)
+  }
+  
+  if(n == 5){
+    gridExtra::grid.arrange(p1, p2, p3, p4,
+                          p_blank, p5, p6, p7,
+                          p_blank, p_blank, p8, p9,
+                          p_blank,p_blank,p_blank,p10,
+                          nrow = 4)
+  }
+  
+}
+#values = c('Amoxicillin' = "#0CC6DE", 'Cephalexin' = "#024731",  'Ciprofloxacin' = "#34B233", 'Streptomycin' ="#002F5F", 'Tetracycline' ='#9672b5')) +
+
+
+```

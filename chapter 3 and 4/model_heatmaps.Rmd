@@ -1,0 +1,1225 @@
+---
+title: "Heat mapping model results"
+output:
+  html_notebook:
+    code_folding: hide
+---
+
+### Aim: Run intercept only models with synthetic data to create contour plots
+
+```{r}
+library(brms)
+library(tidyverse)
+library(bayesplot)
+library(gridExtra)
+source("~/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/phd_scripts_remote copy 2/oh_star/chap3/heatmap_functions.R")
+```
+
+### Paths
+```{r}
+data_path <- "/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/rds_rda/modelling_uncertainty/data_with_locations/"
+model_save_path <- "/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/rds_rda/modelling_uncertainty/model_comparisons/"
+synth_data_path <-  "/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/rds_rda/modelling_uncertainty/model_comparisons/synth_data/"
+countour_save_path <- "/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/rds_rda/modelling_uncertainty/model_comparisons/countour_plots/"
+
+```
+
+
+### Synthetic data generation
+```{r}
+# full range
+am_raw <- seq(0,31, 1)^2
+pc_raw <- seq(0,31, 1)^2
+pc <- rep(pc_raw, length(am_raw)) 
+pc <- sort(pc)
+am <- rep(am_raw, length(pc_raw))
+
+if(length(am) == length(pc)){
+  print("TRUE")
+}
+
+synth_data <- tibble("pc" = pc, "am" = am) %>%
+  mutate(res = am/(pc*10))
+         
+synth_data <- synth_data %>%
+  mutate(res = ifelse(am > pc, NA, res)) %>%
+  filter(!is.na(res))
+
+synth_data
+
+
+n <- dim(synth_data)[1]
+
+synth_data <- synth_data %>%
+  mutate(assay = as.factor(paste0(rep("assay_", n), seq(1, n))))
+  
+
+saveRDS(synth_data, paste0(countour_save_path, "countour_plots_synth_data.Rds"))
+
+
+# high res
+# - limited to 100 pc
+am_raw <- seq(0, 100, 5)
+pc_raw <- seq(0,100, 5)
+pc <- rep(pc_raw, length(am_raw)) 
+pc <- sort(pc)
+am <- rep(am_raw, length(pc_raw))
+
+if(length(am) == length(pc)){
+  print("TRUE")
+}
+
+synth_data_highres <- tibble("pc" = pc, "am" = am) %>%
+  mutate(res = am/(pc*10))
+
+synth_data_highres <- synth_data_highres %>%
+  mutate(res = ifelse(am > pc, NA, res)) %>%
+  filter(!is.na(res))
+
+
+n <- dim(synth_data_highres)[1]
+
+synth_data_highres <- synth_data_highres %>%
+  mutate(assay = as.factor(paste0(rep("assay_", n), seq(1, n))))
+  
+
+saveRDS(synth_data_highres, paste0(countour_save_path, "countour_plots_synth_data_highres.Rds"))
+```
+
+### Our model
+
+```{r}
+# full range
+synth_data <- readRDS(paste0(countour_save_path, "countour_plots_synth_data.Rds"))
+
+synth_data_brms_format <- synth_data %>%
+  select(-res) %>%
+  gather(key = "am", value = "count", -assay) %>%
+  mutate(am = ifelse(am == "pc", 0, 1))
+
+custom_priors_highvar <- c(
+  set_prior('normal(0, 5)', class = 'b', nlpar = 'interaction'), 
+  set_prior('normal(0, 5)', class = 'b', nlpar = 'main'),
+  set_prior('normal(10, 1)', class = 'sd', nlpar = 'interaction'),
+  set_prior('normal(10, 1)', class = 'sd', nlpar = 'main')# fix variance high using normal dist
+)
+
+start_time <- Sys.time()
+
+countour_plot_ourmodel <- brm(
+                                bf(
+                                  count ~ main + am * log_inv_logit(interaction), 
+                                  main ~ (1|assay),
+                                  interaction ~ (1|assay),
+                                  nl = T # non-linear model
+                                ),
+                                data = as.data.frame(synth_data_brms_format), 
+                                family = negbinomial(), 
+                                prior = custom_priors_highvar,
+                                iter = 2000, warmup = 1000, chains = 4, cores = 4, # parameters for running MCMC
+                                backend = "cmdstanr",
+                                threads = threading(2), #8 cores used
+                                silent = F
+                              )
+end_time <- Sys.time()
+print(end_time - start_time)
+
+saveRDS(countour_plot_ourmodel, paste0(model_save_path, "countour_plot_ourmodel_sqrt.Rds"))
+summary(countour_plot_ourmodel)
+
+# high res
+
+synth_data_high_res <- readRDS(paste0(countour_save_path, "countour_plots_synth_data_highres.Rds"))
+
+synth_data_brms_format_high_res <- synth_data_high_res %>%
+  select(-res) %>%
+  gather(key = "am", value = "count", -assay) %>%
+  mutate(am = ifelse(am == "pc", 0, 1))
+
+
+countour_plot_ourmodel_highres <- brm(
+                                bf(
+                                  count ~ main + am * log_inv_logit(interaction), 
+                                  main ~ (1|assay),
+                                  interaction ~ (1|assay),
+                                  nl = T # non-linear model
+                                ),
+                                data = as.data.frame(synth_data_brms_format_high_res), 
+                                family = negbinomial(), 
+                                prior = custom_priors_highvar,
+                                iter = 2000, warmup = 1000, chains = 4, cores = 4, # parameters for running MCMC
+                                backend = "cmdstanr",
+                                threads = threading(2), #8 cores used
+                                silent = F
+                              )
+end_time <- Sys.time()
+print(end_time - start_time)
+
+saveRDS(countour_plot_ourmodel_highres, paste0(model_save_path, "countour_plot_ourmodel_highres.Rds"))
+summary(countour_plot_ourmodel_highres)
+```
+
+
+
+### Hannah's model
+```{r}
+# data prep
+synth_data <- readRDS(paste0(countour_save_path, "countour_plots_synth_data.Rds")) %>%
+  select(-assay)
+
+q <- 0.01 # min prevalence of 1%
+
+synth_data_schubert_format <- synth_data %>%
+  mutate(fnr=(1-q)^pc, 
+         sens = 1-fnr,
+         spec=1) %>%
+  select(-fnr) %>%
+  mutate(amoxR = ifelse(res == 0, 0, 1)) %>%
+  arrange(res) 
+
+n <- dim(synth_data_schubert_format)[1]
+
+synth_data_schubert_format <- synth_data_schubert_format %>%
+  mutate(assay = as.factor(paste0("assay_", as.character(seq(1,n)))))
+
+# high res data prep
+synth_data_high_res <- readRDS(paste0(countour_save_path, "countour_plots_synth_data_highres.Rds")) %>%
+  select(-assay)
+
+# low q
+q <- 0.001 
+
+synth_data_schubert_format_high_res_q001 <- synth_data_high_res %>%
+  mutate(fnr=(1-q)^pc, 
+         sens = 1-fnr,
+         spec=1) %>%
+  select(-fnr) %>%
+  mutate(amoxR = ifelse(res == 0, 0, 1)) %>%
+  arrange(res) 
+
+n <- dim(synth_data_schubert_format_high_res_q001)[1]
+
+synth_data_schubert_format_high_res_q001 <- synth_data_schubert_format_high_res_q001 %>%
+  mutate(assay = as.factor(paste0("assay_", as.character(seq(1,n)))))
+
+
+# low q 2
+q <- 0.005 
+
+synth_data_schubert_format_high_res_q005 <- synth_data_high_res %>%
+  mutate(fnr=(1-q)^pc, 
+         sens = 1-fnr,
+         spec=1) %>%
+  select(-fnr) %>%
+  mutate(amoxR = ifelse(res == 0, 0, 1)) %>%
+  arrange(res) 
+
+n <- dim(synth_data_schubert_format_high_res_q005)[1]
+
+synth_data_schubert_format_high_res_q005 <- synth_data_schubert_format_high_res_q005 %>%
+  mutate(assay = as.factor(paste0("assay_", as.character(seq(1,n)))))
+
+# med q
+
+q <- 0.01 
+
+synth_data_schubert_format_high_res_q01 <- synth_data_high_res %>%
+  mutate(fnr=(1-q)^pc, 
+         sens = 1-fnr,
+         spec=1) %>%
+  select(-fnr) %>%
+  mutate(amoxR = ifelse(res == 0, 0, 1)) %>%
+  arrange(res) 
+
+n <- dim(synth_data_schubert_format_high_res_q01)[1]
+
+synth_data_schubert_format_high_res_q01 <- synth_data_schubert_format_high_res_q01 %>%
+  mutate(assay = as.factor(paste0("assay_", as.character(seq(1,n)))))
+
+
+# med q 2
+
+q <- 0.05
+
+synth_data_schubert_format_high_res_q05 <- synth_data_high_res %>%
+  mutate(fnr=(1-q)^pc, 
+         sens = 1-fnr,
+         spec=1) %>%
+  select(-fnr) %>%
+  mutate(amoxR = ifelse(res == 0, 0, 1)) %>%
+  arrange(res) 
+
+n <- dim(synth_data_schubert_format_high_res_q05)[1]
+
+synth_data_schubert_format_high_res_q05 <- synth_data_schubert_format_high_res_q05 %>%
+  mutate(assay = as.factor(paste0("assay_", as.character(seq(1,n)))))
+
+# high q
+
+q <- 0.1 
+
+synth_data_schubert_format_high_res_q1 <- synth_data_high_res %>%
+  mutate(fnr=(1-q)^pc, 
+         sens = 1-fnr,
+         spec=1) %>%
+  select(-fnr) %>%
+  mutate(amoxR = ifelse(res == 0, 0, 1)) %>%
+  arrange(res) 
+
+n <- dim(synth_data_schubert_format_high_res_q1)[1]
+
+synth_data_schubert_format_high_res_q1 <- synth_data_schubert_format_high_res_q1 %>%
+  mutate(assay = as.factor(paste0("assay_", as.character(seq(1,n)))))
+
+# high q 2
+q <- 0.5
+
+synth_data_schubert_format_high_res_q5 <- synth_data_high_res %>%
+  mutate(fnr=(1-q)^pc, 
+         sens = 1-fnr,
+         spec=1) %>%
+  select(-fnr) %>%
+  mutate(amoxR = ifelse(res == 0, 0, 1)) %>%
+  arrange(res) 
+
+n <- dim(synth_data_schubert_format_high_res_q5)[1]
+
+synth_data_schubert_format_high_res_q5 <- synth_data_schubert_format_high_res_q5 %>%
+  mutate(assay = as.factor(paste0("assay_", as.character(seq(1,n)))))
+
+
+q <- 0.002
+
+synth_data_schubert_format_high_res_q002 <- synth_data_high_res %>%
+  mutate(fnr=(1-q)^pc, 
+         sens = 1-fnr,
+         spec=1) %>%
+  select(-fnr) %>%
+  mutate(amoxR = ifelse(res == 0, 0, 1)) %>%
+  arrange(res) 
+
+n <- dim(synth_data_schubert_format_high_res_q002)[1]
+
+synth_data_schubert_format_high_res_q002 <- synth_data_schubert_format_high_res_q002 %>%
+  mutate(assay = as.factor(paste0("assay_", as.character(seq(1,n)))))
+
+
+q <- 0.003
+
+synth_data_schubert_format_high_res_q003 <- synth_data_high_res %>%
+  mutate(fnr=(1-q)^pc, 
+         sens = 1-fnr,
+         spec=1) %>%
+  select(-fnr) %>%
+  mutate(amoxR = ifelse(res == 0, 0, 1)) %>%
+  arrange(res) 
+
+n <- dim(synth_data_schubert_format_high_res_q003)[1]
+
+synth_data_schubert_format_high_res_q003 <- synth_data_schubert_format_high_res_q003 %>%
+  mutate(assay = as.factor(paste0("assay_", as.character(seq(1,n)))))
+
+
+q <- 0.004
+
+synth_data_schubert_format_high_res_q004 <- synth_data_high_res %>%
+  mutate(fnr=(1-q)^pc, 
+         sens = 1-fnr,
+         spec=1) %>%
+  select(-fnr) %>%
+  mutate(amoxR = ifelse(res == 0, 0, 1)) %>%
+  arrange(res) 
+
+n <- dim(synth_data_schubert_format_high_res_q004)[1]
+
+synth_data_schubert_format_high_res_q004 <- synth_data_schubert_format_high_res_q004 %>%
+  mutate(assay = as.factor(paste0("assay_", as.character(seq(1,n)))))
+
+
+q <- 0.05
+
+synth_data_schubert_format_high_res_q05 <- synth_data_high_res %>%
+  mutate(fnr=(1-q)^pc, 
+         sens = 1-fnr,
+         spec=1) %>%
+  select(-fnr) %>%
+  mutate(amoxR = ifelse(res == 0, 0, 1)) %>%
+  arrange(res) 
+
+n <- dim(synth_data_schubert_format_high_res_q004)[1]
+
+synth_data_schubert_format_high_res_q004 <- synth_data_schubert_format_high_res_q004 %>%
+  mutate(assay = as.factor(paste0("assay_", as.character(seq(1,n)))))
+
+
+```
+
+### Running schubert model
+```{r}
+schubert_priors <- c(prior(student_t(3, 0, 10), class="b", nlpar="eta", coef='Intercept'))
+
+# low q
+schubert_model_heatmap_q001 <- brm(bf(amoxR ~ (sens + spec - 1)/(1+exp(-eta)) + (1-spec),
+                              eta ~ (1|assay), nl = TRUE),
+                           data = synth_data_schubert_format_high_res_q001,
+                           family= bernoulli(link="identity"),
+                           prior= schubert_priors,
+                           backend = "cmdstanr",
+                           threads = threading(2), #8 cores used
+                           warmup = 2000, iter = 4000, thin=1, chains = 4, cores=4#,
+                           )
+
+summary(schubert_model_heatmap_q001)
+saveRDS(schubert_model_heatmap_q001, paste0(model_save_path, "schubert_model_heatmap_q001.Rds"))
+
+# med q
+schubert_model_heatmap_q01 <- brm(bf(amoxR ~ (sens + spec - 1)/(1+exp(-eta)) + (1-spec),
+                              eta ~ (1|assay), nl = TRUE),
+                           data = synth_data_schubert_format_high_res_q01,
+                           family= bernoulli(link="identity"),
+                           prior= schubert_priors,
+                           backend = "cmdstanr",
+                           threads = threading(2), #8 cores used
+                           warmup = 2000, iter = 4000, thin=1, chains = 4, cores=4#,
+                           )
+
+summary(schubert_model_heatmap_q01)
+saveRDS(schubert_model_heatmap_q01, paste0(model_save_path, "schubert_model_heatmap_q01.Rds"))
+
+# high q
+schubert_model_heatmap_q1 <- brm(bf(amoxR ~ (sens + spec - 1)/(1+exp(-eta)) + (1-spec),
+                              eta ~ (1|assay), nl = TRUE),
+                           data = synth_data_schubert_format_high_res_q1,
+                           family= bernoulli(link="identity"),
+                           prior= schubert_priors,
+                           backend = "cmdstanr",
+                           threads = threading(2), #8 cores used
+                           warmup = 2000, iter = 4000, thin=1, chains = 4, cores=4#,
+                           )
+
+summary(schubert_model_heatmap_q1)
+saveRDS(schubert_model_heatmap_q1, paste0(model_save_path, "schubert_model_heatmap_q1.Rds"))
+
+
+# low q
+schubert_model_heatmap_q005 <- brm(bf(amoxR ~ (sens + spec - 1)/(1+exp(-eta)) + (1-spec),
+                              eta ~ (1|assay), nl = TRUE),
+                           data = synth_data_schubert_format_high_res_q005,
+                           family= bernoulli(link="identity"),
+                           prior= schubert_priors,
+                           backend = "cmdstanr",
+                           threads = threading(2), #8 cores used
+                           warmup = 2000, iter = 4000, thin=1, chains = 4, cores=4#,
+                           )
+
+summary(schubert_model_heatmap_q005)
+saveRDS(schubert_model_heatmap_q005, paste0(model_save_path, "schubert_model_heatmap_q005.Rds"))
+
+# med q
+schubert_model_heatmap_q05 <- brm(bf(amoxR ~ (sens + spec - 1)/(1+exp(-eta)) + (1-spec),
+                              eta ~ (1|assay), nl = TRUE),
+                           data = synth_data_schubert_format_high_res_q05,
+                           family= bernoulli(link="identity"),
+                           prior= schubert_priors,
+                           backend = "cmdstanr",
+                           threads = threading(2), #8 cores used
+                           warmup = 2000, iter = 4000, thin=1, chains = 4, cores=4#,
+                           )
+
+summary(schubert_model_heatmap_q05)
+saveRDS(schubert_model_heatmap_q05, paste0(model_save_path, "schubert_model_heatmap_q05.Rds"))
+
+# high q
+schubert_model_heatmap_q5 <- brm(bf(amoxR ~ (sens + spec - 1)/(1+exp(-eta)) + (1-spec),
+                              eta ~ (1|assay), nl = TRUE),
+                           data = synth_data_schubert_format_high_res_q5,
+                           family= bernoulli(link="identity"),
+                           prior= schubert_priors,
+                           backend = "cmdstanr",
+                           threads = threading(2), #8 cores used
+                           warmup = 2000, iter = 4000, thin=1, chains = 4, cores=4#,
+                           )
+
+summary(schubert_model_heatmap_q5)
+saveRDS(schubert_model_heatmap_q5, paste0(model_save_path, "schubert_model_heatmap_q5.Rds"))
+
+
+schubert_model_heatmap_q002 <- brm(bf(amoxR ~ (sens + spec - 1)/(1+exp(-eta)) + (1-spec),
+                              eta ~ (1|assay), nl = TRUE),
+                           data = synth_data_schubert_format_high_res_q002,
+                           family= bernoulli(link="identity"),
+                           prior= schubert_priors,
+                           backend = "cmdstanr",
+                           threads = threading(2), #8 cores used
+                           warmup = 2000, iter = 4000, thin=1, chains = 4, cores=4#,
+                           )
+
+summary(schubert_model_heatmap_q002)
+saveRDS(schubert_model_heatmap_q002, paste0(model_save_path, "schubert_model_heatmap_q002.Rds"))
+
+
+schubert_model_heatmap_q003 <- brm(bf(amoxR ~ (sens + spec - 1)/(1+exp(-eta)) + (1-spec),
+                              eta ~ (1|assay), nl = TRUE),
+                           data = synth_data_schubert_format_high_res_q003,
+                           family= bernoulli(link="identity"),
+                           prior= schubert_priors,
+                           backend = "cmdstanr",
+                           threads = threading(2), #8 cores used
+                           warmup = 2000, iter = 4000, thin=1, chains = 4, cores=4#,
+                           )
+
+summary(schubert_model_heatmap_q003)
+saveRDS(schubert_model_heatmap_q003, paste0(model_save_path, "schubert_model_heatmap_q003.Rds"))
+
+
+schubert_model_heatmap_q004 <- brm(bf(amoxR ~ (sens + spec - 1)/(1+exp(-eta)) + (1-spec),
+                              eta ~ (1|assay), nl = TRUE),
+                           data = synth_data_schubert_format_high_res_q004,
+                           family= bernoulli(link="identity"),
+                           prior= schubert_priors,
+                           backend = "cmdstanr",
+                           threads = threading(2), #8 cores used
+                           warmup = 2000, iter = 4000, thin=1, chains = 4, cores=4#,
+                           )
+
+summary(schubert_model_heatmap_q004)
+saveRDS(schubert_model_heatmap_q004, paste0(model_save_path, "schubert_model_heatmap_q004.Rds"))
+```
+
+```{r}
+# high res
+schubert_model_heatmap_high_res <- brm(bf(amoxR ~ (sens + spec - 1)/(1+exp(-eta)) + (1-spec),
+                              eta ~ (1|assay), nl = TRUE),
+                           data = synth_data_schubert_format_high_res,
+                           family= bernoulli(link="identity"),
+                           prior= schubert_priors,
+                           backend = "cmdstanr",
+                           threads = threading(2), #8 cores used
+                           warmup = 2000, iter = 4000, thin=1, chains = 4, cores=4#,
+                           )
+
+summary(schubert_model_heatmap_high_res)
+saveRDS(schubert_model_heatmap_high_res, paste0(model_save_path, "schubert_heatmap_model_07_21_high_res.Rds"))
+
+
+```
+
+### No adjustment for PC - logistic regression model
+```{r}
+synth_data <- readRDS(paste0(countour_save_path, "countour_plots_synth_data.Rds")) %>%
+  mutate(amoxR = ifelse(res == 0, 0, 1))
+
+synth_data_high_res <- readRDS(paste0(countour_save_path, "countour_plots_synth_data_highres.Rds"))%>%
+  mutate(amoxR = ifelse(res == 0, 0, 1))
+
+  
+logistic_priors <- c(prior(student_t(3, 0, 10), class="b", nlpar="ranef", coef='Intercept'))
+
+logistic_model_heatmap <- brm(bf(amoxR ~ ranef,
+                              ranef ~ (1|assay), nl = TRUE),
+                           data = synth_data,
+                           family= bernoulli(link="logit"),
+                           prior= logistic_priors,
+                           backend = "cmdstanr",
+                           threads = threading(2), #8 cores used
+                           warmup = 2000, iter = 4000, thin=1, chains = 4, cores=4#,
+                           )
+
+logistic_model_heatmap_highres <- brm(bf(amoxR ~ ranef,
+                              ranef ~ (1|assay), nl = TRUE),
+                           data = synth_data_high_res,
+                           family= bernoulli(link="logit"),
+                           prior= logistic_priors,
+                           backend = "cmdstanr",
+                           threads = threading(2), #8 cores used
+                           warmup = 2000, iter = 4000, thin=1, chains = 4, cores=4#,
+                           )
+
+logistic_model_heatmap_highres
+saveRDS(logistic_model_heatmap_highres, paste0(model_save_path, "logistic_model_heatmap_highres.Rds"))
+
+```
+
+## Results
+### Our model results
+```{r}
+synth_data <- readRDS(paste0(countour_save_path, "countour_plots_synth_data.Rds"))
+
+countour_plot_ourmodel <- readRDS(paste0(model_save_path, "countour_plot_ourmodel_sqrt.Rds"))
+
+countour_plot_ourmodel_results <- get_full_results(countour_plot_ourmodel, countour_plot_ourmodel$data, "ours")
+
+synth_data_high_res <- readRDS(paste0(countour_save_path, "countour_plots_synth_data_highres.Rds"))
+
+countour_plot_ourmodel_high_res <- readRDS(paste0(model_save_path, "countour_plot_ourmodel_highres.Rds"))
+
+countour_plot_ourmodel_high_res_results <- get_full_results(countour_plot_ourmodel_high_res,
+                                                            countour_plot_ourmodel_high_res$data, "ours")
+
+countour_plot_ourmodel_high_res_results
+```
+
+```{r, fig.height=5.5, fig.width = 3.9}
+countour_plot_ourmodel_results_probability_1 <- get_full_results(countour_plot_ourmodel_high_res, countour_plot_ourmodel_high_res$data, "ours_prob", 0.1)
+
+countour_plot_ourmodel_results_probability_01 <- get_full_results(countour_plot_ourmodel_high_res, countour_plot_ourmodel_high_res$data, "ours_prob", 0.01)
+
+countour_plot_ourmodel_results_probability_001 <- get_full_results(countour_plot_ourmodel_high_res, countour_plot_ourmodel_high_res$data, "ours_prob", 0.001)
+
+countour_plot_ourmodel_results_probability_0001 <- get_full_results(countour_plot_ourmodel_high_res, countour_plot_ourmodel_high_res$data, "ours_prob", 0.0001)
+
+countour_plot_ourmodel_results_probability_1 %>%
+  mean
+
+countour_plot_ourmodel_results_probability <- countour_plot_ourmodel_results_probability %>%
+  distinct()
+
+
+prob_plot_no_zeros <- plot_heatmap(countour_plot_ourmodel_results_probability, style = "prob_res", am_limit = 100, pc_limit = 100, point_size = 7.2, zeros = "without")+
+    theme_minimal() +
+    theme(legend.position = "none")+
+  xlab("") +
+  ylab("")
+
+prob_plot_zeros <- plot_heatmap(countour_plot_ourmodel_results_probability, style = "prob_res", am_limit = 100, pc_limit = 100, point_size = 7.2, zeros = "only") +
+    theme_minimal() +
+  xlab("") +
+  ylab("")+
+      theme(legend.position = "none")
+
+gridExtra::grid.arrange(prob_plot_no_zeros, prob_plot_zeros, nrow = 2, heights = c(10,4))
+
+```
+
+### Our model - plot heatmaps
+```{r, fig.height=5.5, fig.width = 4}
+# our model
+res_plot_no_zeros <- plot_heatmap(countour_plot_ourmodel_high_res_results, "res", am_limit = 100, pc_limit = 100, point_size = 7.2, zeros = "without") +
+  ggtitle("") +
+  labs(colour = "Prop. resistant",
+       x = "",
+       y = "") +
+  theme_minimal() +
+    theme(legend.position = "none") +
+    # for high res only
+
+          scale_y_continuous(#trans=scales::trans_new(name = "sq", transform = isq, inverse = sq),
+                             breaks = c(0, 25, 50, 75, 100),
+                             limits = c(0,100)) +
+          scale_x_continuous(#trans=scales::trans_new(name = "sq", transform = isq, inverse = sq),
+                             breaks = c(0, 25, 50, 75, 100),
+                             limits = c(0,100)) +
+   scale_colour_viridis_c(trans ="log10",
+                             limits = c(0.01,1),
+                             na.value = "#440154")
+
+
+res_plot_zeros <- plot_heatmap(countour_plot_ourmodel_high_res_results, "res", am_limit = 100, pc_limit = 100, point_size = 7.5, zeros = "only") +
+  ggtitle("") +
+  labs(colour = "Prop. resistant",
+       y = "",
+       x = "") +
+  theme_minimal() +
+    theme(legend.position = "none") +
+  # for high res only 
+  scale_y_continuous(#trans=scales::trans_new(name = "sq", transform = isq, inverse = sq),
+                             breaks = c(0),
+                             limits = c(0,1)) +
+          scale_x_continuous(#trans=scales::trans_new(name = "sq", transform = isq, inverse = sq),
+                             breaks = c(0, 25, 50, 75, 100),
+                             limits = c(0,100))+
+   scale_colour_viridis_c(trans ="log10",
+                             limits = c(0.01,1),
+                             na.value = "#440154")
+
+ci_diff_plot_no_zeros <- plot_heatmap(countour_plot_ourmodel_high_res_results, "ci_diff", am_limit = 100, pc_limit = 100, point_size =  7.2, zeros = "without") +
+  ggtitle("") +
+  labs(colour = "95% CI",
+       x = "",
+       y = "") +
+  theme_minimal() +
+    theme(legend.position = "none")+
+   scale_colour_viridis_c(trans ="log10",
+                             limits = c(0.01,1),
+                             na.value = "#440154")
+
+ci_diff_plot_zeros <- plot_heatmap(countour_plot_ourmodel_high_res_results, "ci_diff", am_limit = 100, pc_limit = 100, point_size =  7.5, zeros = "only") +
+  ggtitle("") +
+  labs(colour = "95% CI",
+       x = "",
+       y = "") +
+  theme_minimal() +
+    theme(legend.position = "none") +
+   scale_colour_viridis_c(trans ="log10",
+                             limits = c(0.01,1),
+                             na.value = "#440154")
+
+
+gridExtra::grid.arrange(res_plot_no_zeros, res_plot_zeros, nrow = 2, heights = c(10,4))
+gridExtra::grid.arrange(ci_diff_plot_no_zeros, ci_diff_plot_zeros, nrow = 2, heights = c(10,4))
+
+
+ci_diff_plot_zeros + theme(legend.position = "left")
+```
+
+### Schubert model results
+```{r, fig.height=5.5, fig.width = 4}
+schubert_model_heatmap_q001 <- readRDS(paste0(model_save_path, "schubert_model_heatmap_q001.Rds"))
+schubert_model_heatmap_q001
+data <- synth_data_schubert_format_high_res_q001
+synth_data_schubert_format_high_res_q001
+schubert_model_test_results <- get_full_results(schubert_model_heatmap_q001, data, type = "schubert")
+
+res_plot_no_zeros <- plot_heatmap(schubert_model_test_results, "res", am_limit = 100, pc_limit = 100, point_size = 7.2, zeros = "without") +
+  ggtitle("") +
+  labs(colour = "Prop. resistant",
+       x = "",
+       y = "") +
+  theme_minimal() + 
+    theme(legend.position = "none") +
+   scale_colour_viridis_c(trans ="log10",
+                             limits = c(0.001,1),
+                             na.value = "#440154",
+                          option = 'plasma')
+
+
+res_plot_zeros <- plot_heatmap(schubert_model_test_results, "res", am_limit = 100, pc_limit = 100, point_size = 7.5, zeros = "only") +
+  ggtitle("") +
+  labs(colour = "Prop. resistant",
+       y = "",
+       x = "") +
+  theme_minimal() +
+    theme(legend.position = "none")+
+   scale_colour_viridis_c(trans ="log10",
+                             limits = c(0.001,1),
+                             na.value = "#440154",
+                          option = 'plasma')
+
+
+
+# cis 
+
+ci_diff_plot_no_zeros <- plot_heatmap(schubert_model_test_results, "ci_diff", am_limit = 100, pc_limit = 100, point_size =  7.2, zeros = "") +
+  ggtitle("") +
+  labs(colour = "95% CI",
+       x = "",
+       y = "") +
+  theme_minimal() +
+    theme(legend.position = "none")+
+   scale_colour_viridis_c(trans ="log10",
+                             limits = c(0.01,1),
+                             na.value = "#440154",
+                          option = 'plasma')
+
+ci_diff_plot_zeros <- plot_heatmap(schubert_model_test_results, "ci_diff", am_limit = 100, pc_limit = 100, point_size =  7.5, zeros = "only") +
+  ggtitle("") +
+  labs(colour = "95% CI",
+       x = "",
+       y = "") +
+  theme_minimal() +
+    theme(legend.position = "none") +
+   scale_colour_viridis_c(trans ="log10",
+                             limits = c(0.01,1),
+                             na.value = "#440154",
+                          option = 'plasma')
+
+gridExtra::grid.arrange(res_plot_no_zeros, res_plot_zeros, nrow = 2, heights = c(10,4))
+
+gridExtra::grid.arrange(ci_diff_plot_no_zeros, ci_diff_plot_zeros, nrow = 2, heights = c(10,4))
+
+sd_plot_no_zeros$data %>%
+  mutate(diff = mean_ci_upp_binned - mean_ci_low_binned) %>%
+  ggplot() +
+  geom_histogram(aes(x = diff))
+
+
+ci_diff_plot_zeros
+ci_diff_plot_zeros  +
+  theme(legend.position = "left") 
+  
+
+```
+
+### How do q and threshold compare?
+```{r, fig.height=3, fig.width = 4}
+schubert_model_heatmap_q5 <- readRDS(paste0(model_save_path, "schubert_model_heatmap_q5.Rds"))
+schubert_model_heatmap_q1 <- readRDS(paste0(model_save_path, "schubert_model_heatmap_q1.Rds"))
+schubert_model_heatmap_q05 <- readRDS(paste0(model_save_path, "schubert_model_heatmap_q05.Rds"))
+schubert_model_heatmap_q01 <- readRDS(paste0(model_save_path, "schubert_model_heatmap_q01.Rds"))
+schubert_model_heatmap_q005 <- readRDS(paste0(model_save_path, "schubert_model_heatmap_q005.Rds"))
+schubert_model_heatmap_q001 <- readRDS(paste0(model_save_path, "schubert_model_heatmap_q001.Rds"))
+
+
+schubert_model_heatmap_q001
+
+q5_res <- get_full_results(schubert_model_heatmap_q5, schubert_model_heatmap_q5$data, type = 'schubert') 
+mean(q5_res$mean_res)  
+
+across_threshold_values_schubert <- function(df, q){
+  mu <- mean(df$mean_res)
+
+  prop_list <- rep(mu, 11)
+  
+  res <- tibble(prop_list, thres_vals = c(seq(0,0.1, 0.01)), q)
+  return(res)
+}
+
+all_results_thresholded <- rbind(
+        across_threshold_values_schubert(get_full_results(schubert_model_heatmap_q5, schubert_model_heatmap_q1$data, type = 'schubert') , 0.5),
+      across_threshold_values_schubert(get_full_results(schubert_model_heatmap_q1, schubert_model_heatmap_q1$data, type = 'schubert') , 0.1),
+      across_threshold_values_schubert(get_full_results(schubert_model_heatmap_q01, schubert_model_heatmap_q01$data, type = 'schubert') , 0.01),
+      across_threshold_values_schubert(get_full_results(schubert_model_heatmap_q005, schubert_model_heatmap_q005$data, type = 'schubert') , 0.005),
+      across_threshold_values_schubert(get_full_results(schubert_model_heatmap_q001, schubert_model_heatmap_q001$data, type = 'schubert') , 0.001))
+
+all_results_thresholded <- all_results_thresholded %>%
+  group_by(q) %>%
+  summarise(mu = mean(prop_list))
+
+
+all_results_thresholded %>%
+  ggplot() +
+  geom_line(aes(x= q, y = mu), colour = dual_blues[1]) +
+  geom_point(aes(x= q, y = mu), size = 1, colour = dual_blues[2]) +
+  scale_x_continuous(trans = 'log10') +
+  scale_color_continuous(trans = 'log10') +
+  xlab('q')+
+  ylab('Proportion samples with AMR') +
+  ylim(0,1)
+
+```
+
+```{r}
+# Poisson
+countour_plot_ourmodel_highres <- readRDS(paste0(model_save_path, "countour_plot_ourmodel_highres.Rds"))
+
+
+across_threshold_values_poisson <- function(model){
+  prop_list <- c()
+  thres_vals <- c(seq(0,1, 0.05))
+  for (t in thres_vals){
+    probability_results <- get_full_results(model, model$data, type = 'ours_prob', threshold = t)
+    prop <- mean((probability_results %>%
+            mutate(amr_binary = ifelse(probability > 0.5, 1, 0)))$amr_binary)
+    prop_list <- c(prop_list, prop)
+  }
+  res <- tibble(prop_list, thres_vals)
+  return(res)
+}
+
+across_threshold_results_poisson <- across_threshold_values_poisson(countour_plot_ourmodel_highres)
+
+
+across_threshold_results_poisson
+
+p <- across_threshold_results_poisson %>%
+  ggplot() +
+  geom_line(aes(x= thres_vals, y = prop_list), linetype = 2, colour = 'red', size = 0.5, se = F)
+
+poisson_line <- as.tibble(ggplot_build(p)$data[[1]]) %>%
+  select(x, y)
+
+p <- all_results_thresholded %>%
+  ggplot() +
+  geom_hline(data = schubert_y_ints, aes(yintercept = mu, colour = q)) 
+
+
+poisson_line_edit <- poisson_line %>%
+  mutate(x_r = round(x, 4),
+         y_r = round(y, 3), 
+         model = 'poisson')
+
+crossing_points <- schubert_lines %>%
+  mutate(x_r = round(x, 4),
+         y_r = round(y, 3),
+         model = 'schubert') %>%
+  left_join(poisson_line_edit, by = c('x_r', 'y_r')) %>%
+  filter(x_r != 0) %>%
+  filter(model.y == 'poisson') %>%
+  distinct() %>%
+  group_by(group) %>%
+  summarise(mu_x = mean(x_r),
+            mu_y = mean(y_r))
+
+crossing_points <- tibble(q = c(0.1, 0.05, 0.01, 0.005), mu_x = c( 0.065, 0.55, 0.77, 0.94), mu_y = c(0.91271255, 0.47257204, 0.27924722, 0.06447417))
+schubert_y_ints <-  all_results_thresholded 
+  
+across_threshold_results_poisson %>%
+  ggplot() +
+  geom_smooth(aes(x= thres_vals, y = prop_list), colour = 'red', se = T) +
+  geom_point(aes(x= thres_vals, y = prop_list), size = 2,  colour = 'black', shape = 4) +
+  geom_hline(data = schubert_y_ints, aes(yintercept = mu, colour = q)) +
+  geom_point(data = crossing_points, aes(x = mu_x, y = mu_y), colour = 'black', shape = 1, size = 4) +
+  #scale_x_continuous(trans = 'log10') +
+  scale_color_continuous(trans = 'log10') +
+  xlab('Threshold value')+
+  ylab('Total porbability of AMR') +
+  theme_minimal() 
+
+crossing_points
+
+ggplot() +
+geom_smooth(data = all_results_thresholded, aes(x= thres_vals, y = prop_list, group = q, colour = q), size = 0.5, se = F) +
+  geom_point(data = all_results_thresholded, aes(x= thres_vals, y = prop_list, colour = q), size = 1, shape = 4) 
+
+all_results_thresholded %>%
+  ggplot() +
+  #geom_point(aes (y = prop_list, x = q)) +
+  geom_text(data = max_thres_for_labels, aes(x= q, y = prop_list, label = as.character(q_edit)), size = 2.5) 
+
+  all_results_thresholded
+```
+
+
+### Comparing to basic logisitc regression model
+```{r, fig.height=5.5, fig.width = 3.9}
+synth_data_high_res
+synth_data_high_res_logistic <- synth_data_high_res %>%
+  mutate(amoxR = ifelse(am == 0, 0, 1),
+         assay = as.factor(paste0("assay_", as.character(seq(1, 230)))))
+
+synth_data_high_res_logistic
+
+
+countour_plot_logistic_HIGHRES <- brm(formula = amoxR ~ (1|assay),
+                              data = as.data.frame(synth_data_high_res_logistic), 
+                              family = bernoulli(), 
+                              # prior = , #use default
+                              iter = 2000, warmup = 1000, chains = 4, cores = 4, # parameters for running MCMC
+                              backend = "cmdstanr",
+                              threads = threading(2), #8 cores used
+                              silent = F
+                              )
+
+
+saveRDS(countour_plot_logistic_HIGHRES, paste0(model_save_path, "countour_plot_logistic_HIGHRES.Rds"))
+
+countour_plot_logistic_HIGHRES <- readRDS(paste0(model_save_path, "countour_plot_logistic_HIGHRES.Rds"))
+
+summary(countour_plot_logistic_HIGHRES)
+
+data <- synth_data_high_res_logistic
+    n_assay <- length(unique(data$assay))
+
+      
+    results <- as_tibble(fitted(countour_plot_logistic_HIGHRES,
+          newdata = NULL,
+          re_formula = NULL,
+          summary = F
+          ))
+  
+
+    ndraws <- dim(results)[1]
+    
+    results_trans <- results %>%
+        mutate(draw = seq(1,ndraws)) %>%
+        gather(key = "x_val", value = "value", -draw) %>%
+        mutate(x_val = as.numeric(as.character(gsub("V", "", x_val)))) %>%
+          arrange(draw, x_val) 
+    
+    results_trans
+    
+    results_trans_withassay <- results_trans %>%
+      mutate(assay = rep(unique(data$assay), ndraws)) 
+    
+    results <- results_trans_withassay %>%
+      group_by(assay) %>%
+      summarise(var_res = sd(value),
+                mean_res = mean(value),
+                ci_upp = quantile(value, 0.975),
+                ci_low = quantile(value, 0.025)) %>%
+      left_join(data, by = "assay")
+
+    results 
+
+        
+min(results$mean_res)    
+max(results$mean_res)    
+
+res_plot_no_zeros <- plot_heatmap(results, "res", am_limit = 100, pc_limit = 100, point_size = 7.2, zeros = "without") +
+  ggtitle("") +
+  labs(colour = "Prop. resistant",
+       x = "",
+       y = "") +
+  theme_minimal() +
+    #theme(legend.position = "none") +
+  scale_colour_viridis_c(trans = "log10",
+                             limits = c(0.7,1),
+                             na.value = "#440154")
+
+res_plot_zeros <- plot_heatmap(results, "res", am_limit = 100, pc_limit = 100, point_size = 7.2, zeros = "only") +
+  ggtitle("") +
+  labs(colour = "Prop. resistant",
+       x = "",
+       y = "") +
+  theme_minimal() +
+   # theme(legend.position = "none")  +
+  scale_colour_viridis_c(trans = "log10",
+                             limits = c(0.7,1),
+                             na.value = "#440154")
+   
+gridExtra::grid.arrange(res_plot_no_zeros, res_plot_zeros, nrow = 2, heights = c(8,6))
+
+res_plot_no_zeros
+```
+
+## Direct comparison - schubert and poisson probabilities, using equivilant threshold (0.021)
+```{r, fig.height=5.5, fig.width = 3.9}
+schubert_model_heatmap_q1
+schubert_model_heatmap_q003 <- readRDS(paste0(model_save_path, "schubert_model_heatmap_q003.Rds"))
+schubert_model_heatmap_q002 <- readRDS(paste0(model_save_path, "schubert_model_heatmap_q002.Rds"))
+schubert_model_heatmap_q001 <- readRDS(paste0(model_save_path, "schubert_model_heatmap_q001.Rds"))
+
+schubert_model_heatmap_q003
+schubert_model_heatmap_q002
+schubert_model_heatmap_q001
+synth_data_schubert_format_high_res_q001
+synth_data_schubert_format_high_res_q002
+synth_data_schubert_format_high_res_q003
+thresholded_results_021
+mean(thresholded_results_021$probability)
+thresholded_results_021 <- get_full_results(model = schubert_model_heatmap_q1, data = synth_data_schubert_format_high_res_q01,
+                 type = 'schubert')%>%
+  mutate(probability = mean_res)
+mean(thresholded_results_021$probability)
+thresholded_results_021
+thresholded_results_051 <- get_full_results(model = schubert_model_heatmap_q002, data = synth_data_schubert_format_high_res_q05,
+                 type = 'schubert')%>%
+  mutate(probability = mean_res)
+mean(thresholded_results_051$probability)
+thresholded_results_093 <- get_full_results(model = schubert_model_heatmap_q003, data = synth_data_schubert_format_high_res_q1,
+                 type = 'schubert') %>%
+  mutate(probability = mean_res)
+mean(thresholded_results_093$probability)
+
+thresholded_results_021
+res_plot_no_zeros <- plot_heatmap(thresholded_results_051, "prob_res", am_limit = 100, pc_limit = 100, point_size = 7.2, zeros = "without") +
+  ggtitle("") +
+  labs(colour = "Prop. resistant",
+       x = "",
+       y = "") +
+  theme_minimal() + 
+    theme(legend.position = "none")  +
+   scale_colour_viridis_c(trans ="log10",
+                             limits = c(0.01,1),
+                             na.value = "#440154",
+                          option = 'plasma')
+
+
+res_plot_zeros <- plot_heatmap(thresholded_results_051, "prob_res", am_limit = 100, pc_limit = 100, point_size = 7.5, zeros = "only") +
+  ggtitle("") +
+  labs(colour = "Prop. resistant",
+       y = "",
+       x = "") +
+  theme_minimal() +
+    theme(legend.position = "none")+
+   scale_colour_viridis_c(trans ="log10",
+                             limits = c(0.01,1),
+                             na.value = "#440154",
+                          option = 'plasma')
+
+
+
+gridExtra::grid.arrange(res_plot_no_zeros, res_plot_zeros, nrow = 2, heights = c(10,4))
+
+res_plot_no_zeros + theme(legend.position = "left") 
+
+mean(thresholded_results_021$probability)
+mean(thresholded_results_051$probability)
+thresholded_results_051
+
+thresholded_results_021
+```
+
+
+## Direct comparison - schubert and poisson probabilities, using equivilant threshold (0.021)
+```{r, fig.height=5.5, fig.width = 3.9}
+countour_plot_ourmodel_highres <- readRDS(paste0(model_save_path, "countour_plot_ourmodel_highres.Rds"))
+countour_plot_ourmodel_highres
+thresholded_results_021 <- get_full_results(model = countour_plot_ourmodel_highres, data = countour_plot_ourmodel_highres$data,
+                 type = 'ours_prob', threshold = 0.07)
+
+thresholded_results_051 <- get_full_results(model = countour_plot_ourmodel_highres, data = countour_plot_ourmodel_highres$data,
+                 type = 'ours_prob', threshold = 0.051)
+
+thresholded_results_093 <- get_full_results(model = countour_plot_ourmodel_highres, data = countour_plot_ourmodel_highres$data,
+                 type = 'ours_prob', threshold = 0.093)
+mean(thresholded_results_021$probability)
+
+res_plot_no_zeros <- plot_heatmap(thresholded_results_021, "prob_res", am_limit = 100, pc_limit = 100, point_size = 7.2, zeros = "without") +
+  ggtitle("") +
+  labs(colour = "Prop. resistant",
+       x = "",
+       y = "") +
+  theme_minimal() + 
+    theme(legend.position = "none") +
+   scale_colour_viridis_c(trans ="log10",
+                             limits = c(0.01,1),
+                             na.value = "#440154",
+                          option = 'plasma')
+                          
+
+
+res_plot_zeros <- plot_heatmap(thresholded_results_021, "prob_res", am_limit = 100, pc_limit = 100, point_size = 7.5, zeros = "only") +
+  ggtitle("") +
+  labs(colour = "Prop. resistant",
+       y = "",
+       x = "") +
+  theme_minimal() +
+    theme(legend.position = "none")+
+   scale_colour_viridis_c(trans ="log10",
+                             limits = c(0.01,1),
+                             na.value = "#440154",
+                          option = 'plasma')
+
+
+
+# cis 
+
+
+gridExtra::grid.arrange(res_plot_no_zeros, res_plot_zeros, nrow = 2, heights = c(10,4))
+
+
+res_plot_no_zeros + theme(legend.position = "left") 
+
+```
+
+### Beta regression from calculated draws
+```{r}
+synth_data_highres <- readRDS(paste0(countour_save_path, "countour_plots_synth_data_highres.Rds"))
+synth_data_highres
+
+synth_data_highres_beta <- synth_data_highres %>%
+  mutate(AMR_prop = am/pc,
+         AMR_prop = ifelse(AMR_prop == 1, 1 - 0.0001, 
+                                        ifelse(AMR_prop == 0, 0.0001, AMR_prop)))
+
+form <- bf(AMR_prop ~ 1 + (1|assay), nl=F)
+beta_model <- brm(form,
+                      data = probs_from_poisson_0021,
+                      family = Beta(link="logit"),
+                      backend = "cmdstanr",
+                      threads = threading(2), #8 cores used
+                      warmup = 2000, iter = 4000, chains = 4, cores=4)
+                        
+saveRDS(beta_model, paste0(model_save_path, 'countour_plot_beta_model_highres.Rds'))
+summary(beta_model)
+
+```
+
+### Plotting beta regression results
+```{r}
+beta_model <- readRDS(paste0(model_save_path, 'countour_plot_ourmodel_highres.Rds'))
+beta_data <- readRDS(paste0(data_path, 'probs_from_poisson_0021.Rds'))     
+
+beta_model_results <- get_full_results(beta_model, beta_data, type = "schubert")
+beta_model_results %>%
+  ggplot() +
+  geom_histogram(aes(x = probability))
+
+limits_custom <- c(min(beta_model_results$mean_res)- 0.01, max(beta_model_results$mean_res)+0.01)
+
+limits_custom_cis <- c(min((beta_model_results %>%
+                              mutate(ci_diff = ci_upp - ci_low))$ci_diff),
+                       max((beta_model_results %>%
+                              mutate(ci_diff = ci_upp - ci_low))$ci_diff))
+
+res_plot_no_zeros <- plot_heatmap(beta_model_results, "res", am_limit = 100, pc_limit = 100, point_size = 7.2, zeros = "without") +
+  ggtitle("") +
+  labs(colour = "Prop. resistant",
+       x = "",
+       y = "") +
+  theme_minimal() + 
+    theme(legend.position = "none") +
+   scale_colour_viridis_c(
+                             limits = limits_custom,
+                             na.value = "#440154",
+                          option = 'plasma')
+
+
+res_plot_zeros <- plot_heatmap(beta_model_results, "res", am_limit = 100, pc_limit = 100, point_size = 7.5, zeros = "only") +
+  ggtitle("") +
+  labs(colour = "Prop. resistant",
+       y = "",
+       x = "") +
+  theme_minimal() +
+    theme(legend.position = "none")+
+   scale_colour_viridis_c(
+                             limits = limits_custom,
+                             na.value = "#440154",
+                          option = 'plasma')
+
+
+
+# cis 
+
+ci_diff_plot_no_zeros <- plot_heatmap(schubert_model_test_results, "ci_diff", am_limit = 100, pc_limit = 100, point_size =  7.2, zeros = "") +
+  ggtitle("") +
+  labs(colour = "95% CI",
+       x = "",
+       y = "") +
+  theme_minimal() +
+    theme(legend.position = "none")+
+   scale_colour_viridis_c(
+                             limits = limits_custom_cis,
+                             na.value = "#440154",
+                          option = 'plasma')
+
+ci_diff_plot_zeros <- plot_heatmap(schubert_model_test_results, "ci_diff", am_limit = 100, pc_limit = 100, point_size =  7.5, zeros = "only") +
+  ggtitle("") +
+  labs(colour = "95% CI",
+       x = "",
+       y = "") +
+  theme_minimal() +
+    theme(legend.position = "none") +
+   scale_colour_viridis_c(
+                             limits = limits_custom_cis,
+                             na.value = "#440154",
+                          option = 'plasma')
+
+gridExtra::grid.arrange(res_plot_no_zeros, res_plot_zeros, nrow = 2, heights = c(10,4))
+
+gridExtra::grid.arrange(ci_diff_plot_no_zeros, ci_diff_plot_zeros, nrow = 2, heights = c(10,4))
+
+res_plot_zeros + theme(legend.position = "left")
+
+
+```
+```{r, fig.width = 5, fig.height = 3}
+tibble('pc' = rep(seq(1, 1000), 3),
+       'q' = sort(rep(c(0.1, 0.01, 0.001), 1000))) %>%
+  mutate(fnr = (1-q)^pc,
+         sens = 1 - fnr) %>%
+  ggplot() +
+  geom_line(aes(x = pc, y = sens, group = as.factor(q), colour = as.factor(q))) +
+  theme_minimal() +
+  xlab('AM-free plate count') +
+  ylab('Sensitivity')
+
+
+```
+
+```{r, fig.width= 5, fig.height=2}
+countour_plot_ourmodel_highres <- readRDS(paste0(model_save_path, "countour_plot_ourmodel_highres.Rds"))
+schubert_model_heatmap <- readRDS(paste0(model_save_path, "schubert_model_heatmap_q01.Rds"))
+
+get_variables(countour_plot_ourmodel_highres)
+
+countour_plot_ourmodel_highres %>%
+  spread_draws(r_assay__main[assay_10,Intercept]) %>%
+  ggplot() +
+  geom_histogram(aes(x = inv_logit_scaled(r_assay__main)))
+
+countour_plot_ourmodel_highres %>%
+  spread_draws(r_assay__main[assay_100,Intercept]) %>%
+  mutate(est = inv_logit_scaled(r_assay__main),
+         col = ifelse(est > 0.3, 1, 0)) %>%
+  ungroup() %>%
+  count(col)
+  ggplot() +
+  geom_histogram(aes(x = est, fill = as.factor(col)), binwidth = 0.001) +
+  theme_minimal()
+
+countour_plot_ourmodel_highres$data %>%
+  filter(count == 0)
+```
+

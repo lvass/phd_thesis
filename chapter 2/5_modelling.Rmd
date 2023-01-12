@@ -1,0 +1,808 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+### Load libraries, paths and dataset
+```{r}
+library(tidyverse)
+library(lubridate)
+library(brms)
+options(mc.cores = 8, brms.backend = "cmdstanr") # allows threading
+library(tryCatchLog)
+library(projpred)
+library(lubridate)
+library(tidybayes)
+
+path <- "/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/synergy/data/"
+save_path <- "/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/synergy/results/"
+
+synergy_RF <- readRDS(paste0(path, 'synergy_RF.Rds'))
+
+
+```
+
+
+```{r}
+synergy_RF %>% 
+  filter(if_any(everything(), is.na))
+
+model_group_premises_id <- brm(total_mgkg_esvac_O ~ 1 + (1|premises_id),  
+              data = synergy_RF, 
+              warmup = 2000, iter = 4000, 
+              chains = 4,
+              family = gaussian(link = 'identity'),
+              adapt_delta = 0.99) 
+
+
+model_group_year <- brm(total_mgkg_esvac_O ~ 1 + (1|year),  
+              data = synergy_RF, 
+              warmup = 2000, iter = 4000, 
+              chains = 4,
+              family = gaussian(link = 'identity'),
+              adapt_delta = 0.99) 
+
+
+model_group_region <- brm(total_mgkg_esvac_O ~ 1 + (1|region),  
+              data = synergy_RF, 
+              warmup = 2000, iter = 4000, 
+              chains = 4,
+              family = gaussian(link = 'identity'),
+              adapt_delta = 0.99) 
+
+
+model_group_all <- brm(total_mgkg_esvac_O ~ 1 + (1|year) + (1|premises_id) + (1|region),  
+              data = synergy_RF, 
+              warmup = 2000, iter = 4000, 
+              chains = 4,
+              family = gaussian(link = 'identity'),
+              adapt_delta = 0.99) 
+
+```
+
+```{r, fig.width = 9, fig.height = 5}
+model_group_premises_id
+model_group_year
+model_group_region
+model_group_all
+
+model_group_premises_id_draws <- model_group_premises_id %>%
+  spread_draws(sd_premises_id__Intercept) %>%
+  select(-.draw, -.iteration, -.chain) %>%
+  mutate(model = '1) Premises ID') %>%
+  gather(key = 'group_eff', value = 'draw', -model)
+
+model_group_year_draws <- model_group_year %>%
+  spread_draws(sd_year__Intercept) %>%
+  select(-.draw, -.iteration, -.chain)%>%
+  mutate(model = '2) Year')%>%
+  gather(key = 'group_eff', value = 'draw', -model)
+
+model_group_region_draws <- model_group_region %>%
+  spread_draws(sd_region__Intercept) %>%
+  select(-.draw, -.iteration, -.chain)%>%
+  mutate(model = '3) Region')%>%
+  gather(key = 'group_eff', value = 'draw', -model)
+
+model_group_all_draws <- model_group_all %>%
+  spread_draws(sd_premises_id__Intercept,
+               sd_year__Intercept,
+               sd_region__Intercept) %>%
+  select(-.draw, -.iteration, -.chain)%>%
+  mutate(model = '4) All')%>%
+  gather(key = 'group_eff', value = 'draw', -model)
+  
+all_ran_eff_sds <- rbind(model_group_premises_id_draws,
+      model_group_year_draws,
+      model_group_region_draws,
+      model_group_all_draws) %>%
+  mutate(model = as.factor(model))
+
+levels(all_ran_eff_sds$model)
+
+
+all_ran_eff_sds %>%
+  ggplot() +
+  stat_pointinterval(aes(x = draw, y = model, group = group_eff, colour = group_eff), position = position_dodge(preserve = 'total')) +
+  theme_minimal() +
+  xlab('Estimated SD of group effect intercept') +
+  ylab('')
+
+
+```
+
+## Total mgkg
+### Reference model
+```{r}
+tryLog(total_mgkg_ref_model <- brm(
+              total_mgkg_esvac_O ~ max_summer_temp_S + min_winter_temp_S + ann_mean_rain_S + mu_SCC_ml_S + mu_parity_S  + total_prod_per_cow_S + herd_size_S + n_visits_S + prop_herd_DCT_T_S + calving_pattern_F + organic_F + (1|year) + (1|premises_id),  
+              data = synergy_RF, 
+              warmup = 2000, iter = 4000, 
+              chains = 4,
+              family = gaussian(link = 'identity')) )
+
+
+tryLog(saveRDS(total_mgkg_ref_model, paste0(path, 'total_mgkg_ref_model.Rds')))
+
+```
+
+### Var sel with CV
+```{r}
+total_mgkg_ref_model <- readRDS(paste0(path, 'total_mgkg_ref_model.Rds'))
+
+tryLog(total_mgkg_var_sel_cv <- cv_varsel(get_refmodel(total_mgkg_ref_model),
+                                          method = 'forward', cv_method = 'kfold', K = 5, verbose = TRUE, seed = 1))
+
+tryLog(saveRDS(total_mgkg_var_sel_cv, paste0(path, 'total_mgkg_var_sel_seed1.Rds')))
+
+tryLog(total_mgkg_var_sel_cv <- cv_varsel(get_refmodel(total_mgkg_ref_model),
+                                          method = 'forward', cv_method = 'kfold', K = 5, verbose = TRUE, seed = 2))
+
+tryLog(saveRDS(total_mgkg_var_sel_cv, paste0(path, 'total_mgkg_var_sel_seed2.Rds')))
+
+tryLog(total_mgkg_var_sel_cv <- cv_varsel(get_refmodel(total_mgkg_ref_model),
+                                          method = 'forward', cv_method = 'kfold', K = 5, verbose = TRUE, seed = 3))
+
+tryLog(saveRDS(total_mgkg_var_sel_cv, paste0(path, 'total_mgkg_var_sel_seed3.Rds')))
+
+tryLog(total_mgkg_var_sel_cv <- cv_varsel(get_refmodel(total_mgkg_ref_model),
+                                          method = 'forward', cv_method = 'kfold', K = 5, verbose = TRUE, seed = 4))
+
+tryLog(saveRDS(total_mgkg_var_sel_cv, paste0(path, 'total_mgkg_var_sel_seed4.Rds')))
+
+
+```
+
+# Results of var sel
+## Total mgkg
+```{r, fig.width = 4.5, fig.height = 2.5}
+total_mgkg_var_sel_cv1 <- readRDS(paste0(path, 'total_mgkg_var_sel_seed1.Rds'))
+total_mgkg_var_sel_cv2 <- readRDS(paste0(path, 'total_mgkg_var_sel_seed2.Rds'))
+total_mgkg_var_sel_cv3 <- readRDS(paste0(path, 'total_mgkg_var_sel_seed3.Rds'))
+total_mgkg_var_sel_cv4 <- readRDS(paste0(path, 'total_mgkg_var_sel_seed4.Rds'))
+
+nsel_list <- c()
+for (i in seq(0.05, 1, 0.05)){
+  nsel <- suggest_size(total_mgkg_var_sel_cv, alpha=i)
+  nsel_list <- c(nsel_list, nsel)
+}
+
+tibble('nsel' = nsel_list, 
+       'alpha' = seq(0.05, 1, 0.05)) %>%
+  ggplot() +
+  geom_line(aes(x = alpha, y = nsel))+
+  geom_point(aes(x = alpha, y = nsel)) +
+  theme_minimal() +
+  xlab('Alpha value') +
+  ylab('Number of predictor\n terms') +
+  scale_x_continuous(breaks = seq(0.05, 1, 0.1)) +
+  scale_y_continuous(breaks = seq(3, 13), limits = c(3, 13))
+```
+
+```{r, fig.width = 7, fig.height = 4}
+p1 <- plot(total_mgkg_var_sel_cv1, stats = c('elpd', 'rmse'), deltas=FALSE) +
+  geom_vline(aes(xintercept = 7), colour = 'red', linetype = 2)
+p2 <- plot(total_mgkg_var_sel_cv2, stats = c('elpd', 'rmse'), deltas=FALSE) +
+  geom_vline(aes(xintercept = 7), colour = 'red', linetype = 2)
+p3 <- plot(total_mgkg_var_sel_cv3, stats = c('elpd', 'rmse'), deltas=FALSE) +
+  geom_vline(aes(xintercept = 7), colour = 'red', linetype = 2)
+p4 <- plot(total_mgkg_var_sel_cv4, stats = c('elpd', 'rmse'), deltas=FALSE) +
+  geom_vline(aes(xintercept = 7), colour = 'red', linetype = 2)
+
+cv1 <- p1$data %>%
+  mutate(cv = 1)
+cv2 <- p2$data %>%
+  mutate(cv = 2)
+cv3 <- p3$data %>%
+  mutate(cv = 3)
+cv4 <- p4$data %>%
+  mutate(cv = 4)
+
+rbind(cv1, cv2, cv3, cv4) %>%
+  filter(statistic == 'elpd') %>%
+  group_by(size) %>%
+  summarise(low = mean(lq),
+            upp = mean(uq),
+            est = mean(value)) %>%
+  ggplot() +
+  geom_errorbar(aes(x = size, ymin = low, ymax = upp)) +
+  geom_point(aes(x =  size, y = est)) 
+
+rbind(cv1, cv2, cv3, cv4) %>%
+  filter(statistic == 'rmse') %>%
+  group_by(size) %>%
+  summarise(low = mean(lq),
+            upp = mean(uq),
+            est = mean(value)) %>%
+  ggplot() +
+  geom_errorbar(aes(x = size, ymin = low, ymax = upp)) +
+  geom_point(aes(x =  size, y = est))
+
+
+frac1 <- as.tibble(total_mgkg_var_sel_cv1[["pct_solution_terms_cv"]])%>%
+  gather(key = 'predictor', value = 'frac', -size) %>%
+  mutate(fold = 1)
+frac2 <- as.tibble(total_mgkg_var_sel_cv2[["pct_solution_terms_cv"]])%>%
+  gather(key = 'predictor', value = 'frac', -size) %>%
+  mutate(fold = 2)
+frac3 <- as.tibble(total_mgkg_var_sel_cv3[["pct_solution_terms_cv"]])%>%
+  gather(key = 'predictor', value = 'frac', -size) %>%
+  mutate(fold = 3)
+frac4 <- as.tibble(total_mgkg_var_sel_cv4[["pct_solution_terms_cv"]])%>%
+  gather(key = 'predictor', value = 'frac', -size) %>%
+  mutate(fold = 4)
+
+
+
+
+frac_choosing_solution_term <- rbind(frac1, frac2, frac3, frac4) %>%
+  group_by(size, predictor) %>%
+  summarise(frac = mean(frac))
+
+frac_choosing_solution_term <- frac_choosing_solution_term %>%
+  mutate(label_vals = as.character(frac),
+         predictor = factor(predictor, levels = c(solution_terms(total_mgkg_var_sel_cv))))
+
+n_predictors <-  length(solution_terms(total_mgkg_var_sel_cv))
+levels(frac_choosing_solution_term$predictor) <- c('Premises GE', 'Year GE', 'Purchase days',
+                                                   'Herd size', '% DCT', 'Milk yield',
+                                                   'Mean parity', 'Mean SCC', 'Max. summer temp.',
+                                                   'Organic', 'Min. winter temp',  'Calving pattern', 'Rainfall')
+
+frac_choosing_solution_term %>%
+  ggplot(aes(x = size, y = predictor)) +
+  geom_tile(aes(fill = frac)) +
+  geom_text(aes(label = label_vals), size = 3) +
+  scale_fill_gradient(low = "#e3e3e3",high = "#2869f7")+
+  scale_x_continuous(breaks = seq(1,13)) +
+  theme_minimal() +
+  xlab('Step of forward stepwise search') +
+  ylab('Predictor terms selected')
+
+
+tryLog(saveRDS(total_mgkg_varsel_model, paste0(path, 'total_mgkg_varsel_model.Rds')))
+
+total_mgkg_ref_model <- readRDS(paste0(path, 'total_mgkg_ref_model.Rds'))
+
+orig_outcome <- total_mgkg_ref_model$data$total_mgkg_esvac_O
+
+all_rsme <- c()
+for (i in seq(1, n_predictors+1)){
+  rmse <- sqrt(mean((orig_outcome-total_mgkg_var_sel_cv$summaries$sub[[i]]$mu)^2))
+  all_rsme <- c(all_rsme, rmse)
+}
+
+all_rsme
+
+
+```
+
+### Running steps 3 - 8
+```{r}
+tryLog(step_model <- brm(
+              total_mgkg_esvac_O ~ (1|year) + (1|premises_id) + n_visits_S + herd_size_S + prop_herd_DCT_T_S + total_prod_per_cow_S + mu_parity_S +  mu_SCC_ml_S,
+              data = synergy_RF, 
+              warmup = 2000, iter = 4000, 
+              chains = 4,
+              family = gaussian(link = 'identity')) )
+
+
+tryLog(saveRDS(step_model, paste0(path, 'total_mgkg_ref_model_step8.Rds')))
+
+tryLog(step_model <- brm(
+              total_mgkg_esvac_O ~ (1|year) + (1|premises_id) + n_visits_S + herd_size_S + prop_herd_DCT_T_S + total_prod_per_cow_S + mu_parity_S,
+              data = synergy_RF, 
+              warmup = 2000, iter = 4000, 
+              chains = 4,
+              family = gaussian(link = 'identity')) )
+
+
+tryLog(saveRDS(step_model, paste0(path, 'total_mgkg_ref_model_step7.Rds')))
+
+tryLog(step_model <- brm(
+              total_mgkg_esvac_O ~ (1|year) + (1|premises_id) + n_visits_S + herd_size_S + prop_herd_DCT_T_S + total_prod_per_cow_S,
+              data = synergy_RF, 
+              warmup = 2000, iter = 4000, 
+              chains = 4,
+              family = gaussian(link = 'identity')) )
+
+
+tryLog(saveRDS(step_model, paste0(path, 'total_mgkg_ref_model_step6.Rds')))
+
+tryLog(step_model <- brm(
+              total_mgkg_esvac_O ~ (1|year) + (1|premises_id) + n_visits_S + herd_size_S + prop_herd_DCT_T_S ,
+              data = synergy_RF, 
+              warmup = 2000, iter = 4000, 
+              chains = 4,
+              family = gaussian(link = 'identity')) )
+
+
+tryLog(saveRDS(step_model, paste0(path, 'total_mgkg_ref_model_step5.Rds')))
+
+tryLog(step_model <- brm(
+              total_mgkg_esvac_O ~ (1|year) + (1|premises_id) + n_visits_S + herd_size_S ,
+              data = synergy_RF, 
+              warmup = 2000, iter = 4000, 
+              chains = 4,
+              family = gaussian(link = 'identity')) )
+
+
+tryLog(saveRDS(step_model, paste0(path, 'total_mgkg_ref_model_step4.Rds')))
+
+tryLog(step_model <- brm(
+              total_mgkg_esvac_O ~ (1|year) + (1|premises_id) + n_visits_S,
+              data = synergy_RF, 
+              warmup = 2000, iter = 4000, 
+              chains = 4,
+              family = gaussian(link = 'identity')) )
+
+
+tryLog(saveRDS(step_model, paste0(path, 'total_mgkg_ref_model_step3.Rds')))
+
+```
+
+### R2 and residual of 3-8
+```{r, fig.width = 5, fig.height = 3}
+step3 <- readRDS(paste0(path, 'total_mgkg_ref_model_step3.Rds'))
+step4 <- readRDS(paste0(path, 'total_mgkg_ref_model_step4.Rds'))
+step5 <- readRDS(paste0(path, 'total_mgkg_ref_model_step5.Rds'))
+step6 <- readRDS(paste0(path, 'total_mgkg_ref_model_step6.Rds'))
+step7 <- readRDS(paste0(path, 'total_mgkg_ref_model_step7.Rds'))
+step8 <- readRDS(paste0(path, 'total_mgkg_ref_model_step8.Rds'))
+step13 <- readRDS(paste0(path, 'total_mgkg_ref_model.Rds'))
+
+as.numeric(step3$data$total_mgkg_esvac_O)
+model$data$total_mgkg_esvac_O
+
+get_predictive_error <- function(model, n){
+  orig_predictor_vals <- as.numeric(model$data$total_mgkg_esvac_O)
+  residuals_all <- as.tibble(fitted(model, re_formula = NULL)) %>%
+    mutate(orig_pred = orig_predictor_vals,
+           est_exp = Estimate,
+           diff = orig_pred - est_exp,
+           diff_sq = sqrt(diff*diff))
+  res_summary <- tibble(mu = mean(residuals_all$diff_sq),
+         low = quantile(residuals_all$diff_sq, 0.25),
+         upp =quantile(residuals_all$diff_sq, 0.75),
+         step = n)
+  return(res_summary)
+}
+
+pred_error <- rbind(get_predictive_error(step3, 3),
+      get_predictive_error(step4, 4),
+      get_predictive_error(step5, 5),
+      get_predictive_error(step6, 6),
+      get_predictive_error(step7, 7),
+      get_predictive_error(step8, 8),
+      get_predictive_error(step13, 10)
+      )
+
+
+pred_error %>%
+  ggplot() +
+  geom_point(aes(x = step, y = (mu))) +
+  geom_line(aes(x = step, y = (mu))) +
+  geom_errorbar(aes(x = step, ymax = (upp), ymin = exp(low)), width = 0.5) +
+  geom_hline(aes(yintercept = (get_predictive_error(step13, 13))$mu), linetype = 2, colour = 'red') +
+  theme_minimal() +
+  scale_x_continuous(breaks = seq(3, 10)) +
+  xlab('Number of predictors in model \n(from best search path)') +
+  ylab('mg/PCU error')
+
+exp(pred_error)
+
+get_predictive_error(total_mgkg_7_pred_model, 1)
+
+
+  orig_predictor_vals <- as.numeric(total_mgkg_7_pred_model$data$total_mgkg_esvac_LOG)
+  residuals_all <- as.tibble(fitted(total_mgkg_7_pred_model, re_formula = NULL)) %>%
+    mutate(orig_pred = orig_predictor_vals,
+           est_exp = Estimate,
+           diff = orig_pred - est_exp,
+           diff_sq = sqrt(diff*diff))
+  res_summary <- tibble(mu = mean(residuals_all$diff_sq),
+         low = quantile(residuals_all$diff_sq, 0.25),
+         upp =quantile(residuals_all$diff_sq, 0.75))
+  
+  total_mgkg_7_pred_model$data
+  
+  
+  bayes_R2(step7)
+    bayes_R2(total_mgkg_7_pred_model)
+
+  res_summary
+```
+
+### run suggested model
+```{r, fig.width = 6, fig.height = 3}
+synergy_RF_unscaled <- readRDS(paste0(path, 'synergy_RF_unscaled.Rds'))
+
+synergy_RF_unscaled <- synergy_RF_unscaled %>%
+  mutate(total_mgkg_esvac_LOG = (log10(total_mgkg_esvac)))
+synergy_RF_unscaled
+
+synergy_RF_unscaled <- synergy_RF_unscaled %>%
+  mutate(prop_herd_DCT = ifelse(prop_herd_DCT == 0, 0.001,
+                                ifelse(prop_herd_DCT == 1, 0.999,
+                                       prop_herd_DCT)),
+         prop_herd_DCT_T = brms::logit_scaled(prop_herd_DCT),
+         herd_size_LOG = log10(herd_size),
+        n_visits_LOG = log10(n_visits),
+        total_prod_per_cow_LOG = log10(total_prod_per_cow.y),
+        mu_parity_LOG = log10(mu_parity))
+
+
+
+tryLog(total_mgkg_7_pred_model <- brm(
+                            total_mgkg_esvac_LOG ~  herd_size_LOG + n_visits_LOG + prop_herd_DCT_T + n_visits_LOG + mu_parity_LOG + (1|year) + (1|premises_id),
+              data = synergy_RF_unscaled, 
+              warmup = 1000, iter = 2000, 
+              chains = 4,
+              family = gaussian(link = 'identity')))
+
+total_mgkg_7_pred_model
+tryLog(saveRDS(total_mgkg_7_pred_model, paste0(path, 'total_mgkg_7_pred_model_LOG.Rds')))
+
+total_mgkg_ref_model <- readRDS(paste0(path, 'total_mgkg_ref_model.Rds'))
+total_mgkg_ref_model
+```
+
+### Resdiuals of suggested model
+```{r, fig.width= 3, fig.height = 3}
+total_mgkg_7_pred_model <- readRDS(paste0(path, 'total_mgkg_7_pred_model.Rds'))
+
+total_mgkg_7_pred_model$data %>%
+  add_predicted_draws(total_mgkg_7_pred_model) %>%
+  summarise(
+    p_residual = mean(.prediction < total_mgkg_esvac_LOG),
+    z_residual = qnorm(p_residual),
+    .groups = "drop_last"
+  ) %>%
+  ggplot(aes(sample = z_residual)) +
+  geom_qq(alpha = 0.2) +
+  geom_abline(colour = 'red', linetype = 2) +
+  theme_minimal()
+```
+
+
+### Var 1 - DCT
+```{r, fig.height= 3, fig.width=5}
+pred <- seq(min(synergy_RF_unscaled$prop_herd_DCT_T, na.rm = T),
+                max(synergy_RF_unscaled$prop_herd_DCT_T , na.rm = T))
+
+new_data <- total_mgkg_7_pred_model$data[1:length(pred),] %>%
+  mutate(total_mgkg_esvac_LOG = NA,
+         herd_size = mean(total_mgkg_7_pred_model$data$herd_size),
+         n_visits = mean(total_mgkg_7_pred_model$data$n_visits),
+         prop_herd_DCT_T = pred, 
+         total_prod_per_cow.y = mean(total_mgkg_7_pred_model$data$total_prod_per_cow.y),
+         mu_parity = mean(total_mgkg_7_pred_model$mu_parity),
+         year = NA, 
+         premises_id = NA)
+
+res <- cbind(new_data,
+      fitted(total_mgkg_7_pred_model,
+       newdata  = new_data,
+       re_formula = NA)) %>%
+  select(prop_herd_DCT_T, Estimate, Q2.5, Q97.5) %>%
+  mutate(exp_est = exp(Estimate),
+         lag_exp_est = lag(exp_est),
+         diff = exp_est/lag_exp_est,
+         exp_low = exp(Q2.5),
+         lag_exp_low = lag(exp_low),
+         diff_low = exp_low/lag_exp_low,
+         exp_upp = exp(Q97.5),
+         lag_exp_upp = lag(exp_upp),
+         diff_upp = exp_upp/lag_exp_upp) 
+
+
+
+res %>%
+  ggplot() +
+  geom_line(aes(y = exp(Estimate), x = inv_logit_scaled(prop_herd_DCT_T)*100), colour = dual_blues[2], size = 1.5) +
+  geom_ribbon(aes(ymin = exp(Q2.5), ymax = exp(Q97.5), x = inv_logit_scaled(prop_herd_DCT_T)*100), alpha = 0.3, fill = dual_blues[2]) +
+  xlab('Percentage receiving DCT') +
+  ylab('Estimated annual mg/kg AM') +
+  theme_minimal()
+
+
+
+# logit transformed
+
+pred <- logit_scaled(seq(0.1, 0.9, 0.2))
+
+new_data <- total_mgkg_7_pred_model$data[1:length(pred),] %>%
+  mutate(total_mgkg_esvac_LOG = NA,
+         herd_size = mean(total_mgkg_7_pred_model$data$herd_size),
+         n_visits = mean(total_mgkg_7_pred_model$data$n_visits),
+         prop_herd_DCT_T = pred, 
+         total_prod_per_cow.y = mean(total_mgkg_7_pred_model$data$total_prod_per_cow.y),
+         mu_parity = mean(total_mgkg_7_pred_model$mu_parity),
+         year = NA, 
+         premises_id = NA)
+
+res <- cbind(new_data,
+      fitted(total_mgkg_7_pred_model,
+       newdata  = new_data,
+       re_formula = NA)) %>%
+  select(prop_herd_DCT_T, Estimate, Q2.5, Q97.5) %>%
+  mutate(exp_est = exp(Estimate),
+         lag_exp_est = lag(exp_est),
+         diff = exp_est/lag_exp_est,
+         exp_low = exp(Q2.5),
+         lag_exp_low = lag(exp_low),
+         diff_low = exp_low/lag_exp_low,
+         exp_upp = exp(Q97.5),
+         lag_exp_upp = lag(exp_upp),
+         diff_upp = exp_upp/lag_exp_upp) 
+
+res %>% 
+  select(diff, diff_low, diff_upp)
+
+
+
+# percentage changes
+pred <- logit_scaled(seq(0.1, 0.9, 0.2))
+
+new_data <- total_mgkg_7_pred_model$data[1:length(pred),] %>%
+  mutate(total_mgkg_esvac_LOG = NA,
+         herd_size = mean(total_mgkg_7_pred_model$data$herd_size),
+         n_visits = mean(total_mgkg_7_pred_model$data$n_visits),
+         prop_herd_DCT_T = pred, 
+         mu_parity = mean(total_mgkg_7_pred_model$mu_parity),
+         total_prod_per_cow.y = mean(total_mgkg_7_pred_model$data$total_prod_per_cow.y),
+         year = NA, 
+         premises_id = NA)
+
+res <- cbind(new_data,
+      fitted(total_mgkg_7_pred_model,
+       newdata  = new_data,
+       re_formula = NA)) %>%
+  select(prop_herd_DCT_T, Estimate, Q2.5, Q97.5) %>%
+  mutate(exp_est = exp(Estimate),
+         lag_exp_est = lag(exp_est),
+         diff = exp_est/lag_exp_est,
+         exp_low = exp(Q2.5),
+         lag_exp_low = lag(exp_low),
+         diff_low = exp_low/lag_exp_low,
+         exp_upp = exp(Q97.5),
+         lag_exp_upp = lag(exp_upp),
+         diff_upp = exp_upp/lag_exp_upp) 
+
+res %>% 
+  select(diff, diff_low, diff_upp)
+
+
+
+```
+
+### Var 2 - n_visits
+```{r, fig.height= 3, fig.width=5}
+pred_LOG <- seq(min(synergy_RF_unscaled$n_visits_LOG, na.rm = T),
+                max(synergy_RF_unscaled$n_visits_LOG, na.rm = T), log10())
+
+pred <- seq(min(synergy_RF_unscaled$n_visits, na.rm = T),
+                max(synergy_RF_unscaled$n_visits, na.rm = T), 10)
+
+
+
+new_data <- total_mgkg_7_pred_model$data[1:length(pred),] %>%
+  mutate(total_mgkg_esvac_LOG = NA,
+         herd_size_LOG = mean(total_mgkg_7_pred_model$data$herd_size_LOG),
+         n_visits_LOG = pred_LOG,
+         n_visits = pred,
+         prop_herd_DCT_T = mean(total_mgkg_7_pred_model$data$prop_herd_DCT_T), 
+         total_prod_per_cowLOG = mean(total_mgkg_7_pred_model$data$total_prod_per_cow_LOG),
+         mu_parity_LOG = mean(total_mgkg_7_pred_model$data$mu_parity_LOG),
+         year = NA, 
+         premises_id = NA)
+
+res <- cbind(new_data,
+      fitted(total_mgkg_7_pred_model,
+       newdata  = new_data,
+       re_formula = NA)) %>%
+  select(n_visits_LOG, n_visits, Estimate, Q2.5, Q97.5) %>%
+  mutate(exp_est = exp(Estimate),
+         lag_exp_est = lag(exp_est),
+         diff = exp_est/lag_exp_est,
+         exp_low = exp(Q2.5),
+         lag_exp_low = lag(exp_low),
+         diff_low = exp_low/lag_exp_low,
+         exp_upp = exp(Q97.5),
+         lag_exp_upp = lag(exp_upp),
+         diff_upp = exp_upp/lag_exp_upp) 
+
+res
+
+res %>%
+  ggplot() +
+  geom_line(aes(y = exp(Estimate), x = pred), colour = dual_blues[2], size = 1.5) +
+  #geom_ribbon(aes(ymin = exp(Q2.5), ymax = exp(Q97.5), x = n_visits_LOG), alpha = 0.3, fill = dual_blues[2]) +
+  xlab('Days AMs purchased') +
+  ylab('Estimated annual mg/kg AM') +
+  theme_minimal()
+
+
+res %>%
+  summarise_all(~mean(., na.rm = T)) %>%
+  select(diff, diff_low, diff_upp)
+
+res
+
+```
+
+### Var 3 - milk yield
+```{r, fig.height= 3, fig.width=5}
+pred <- seq(min(synergy_RF_unscaled$total_prod_per_cow.y, na.rm = T),
+                max(synergy_RF_unscaled$total_prod_per_cow.y , na.rm = T), 1000)
+
+new_data <- total_mgkg_7_pred_model$data[1:length(pred),] %>%
+  mutate(total_mgkg_esvac_LOG = NA,
+         herd_size = mean(total_mgkg_7_pred_model$data$herd_size),
+         n_visits = mean(total_mgkg_7_pred_model$data$n_visits),
+         prop_herd_DCT_T = mean(total_mgkg_7_pred_model$data$prop_herd_DCT_T), 
+         mu_parity = mean(total_mgkg_7_pred_model$data$mu_parity),
+         total_prod_per_cow.y = pred,
+         year = NA, 
+         premises_id = NA)
+
+res <- cbind(new_data,
+      fitted(total_mgkg_7_pred_model,
+       newdata  = new_data,
+       re_formula = NA)) %>%
+  select(total_prod_per_cow.y, Estimate, Q2.5, Q97.5) %>%
+  mutate(exp_est = exp(Estimate),
+         lag_exp_est = lag(exp_est),
+         diff = exp_est/lag_exp_est,
+         exp_low = exp(Q2.5),
+         lag_exp_low = lag(exp_low),
+         diff_low = exp_low/lag_exp_low,
+         exp_upp = exp(Q97.5),
+         lag_exp_upp = lag(exp_upp),
+         diff_upp = exp_upp/lag_exp_upp) 
+
+res %>%
+  ggplot() +
+  geom_line(aes(y = exp(Estimate), x = total_prod_per_cow.y), colour = dual_blues[2], size = 1.5) +
+  geom_ribbon(aes(ymin = exp(Q2.5), ymax = exp(Q97.5), x = total_prod_per_cow.y), alpha = 0.3, fill = dual_blues[2]) +
+  xlab('Milk yield (kg)') +
+  ylab('Estimated annual mg/kg AM') +
+  theme_minimal()
+
+# note - this is for a 1000kg increase
+res %>%
+  summarise_all(~mean(., na.rm = T)) %>%
+  select(diff, diff_low, diff_upp)
+```
+
+
+### Var 4 - herd size
+```{r, fig.height= 3, fig.width=5}
+pred <- seq(min(synergy_RF_unscaled$herd_size, na.rm = T),
+                max(synergy_RF_unscaled$herd_size , na.rm = T), 100)
+
+new_data <- total_mgkg_7_pred_model$data[1:length(pred),] %>%
+  mutate(total_mgkg_esvac_LOG = NA,
+         herd_size = pred,
+         n_visits = mean(total_mgkg_7_pred_model$data$n_visits),
+         prop_herd_DCT_T = mean(total_mgkg_7_pred_model$data$prop_herd_DCT_T), 
+         total_prod_per_cow.y = mean(total_mgkg_7_pred_model$data$total_prod_per_cow.y),
+         mu_parity = mean(total_mgkg_7_pred_model$data$mu_parity),
+         year = NA, 
+         premises_id = NA)
+
+res <- cbind(new_data,
+      fitted(total_mgkg_7_pred_model,
+       newdata  = new_data,
+       re_formula = NA)) %>%
+  select(herd_size, Estimate, Q2.5, Q97.5) %>%
+  mutate(exp_est = exp(Estimate),
+         lag_exp_est = lag(exp_est),
+         diff = exp_est/lag_exp_est,
+         exp_low = exp(Q2.5),
+         lag_exp_low = lag(exp_low),
+         diff_low = exp_low/lag_exp_low,
+         exp_upp = exp(Q97.5),
+         lag_exp_upp = lag(exp_upp),
+         diff_upp = exp_upp/lag_exp_upp) 
+
+res %>%
+  ggplot() +
+  geom_line(aes(y = exp(Estimate), x = herd_size), colour = dual_blues[2], size = 1.5) +
+  geom_ribbon(aes(ymin = exp(Q2.5), ymax = exp(Q97.5), x = herd_size), alpha = 0.3, fill = dual_blues[2]) +
+  xlab('Herd size') +
+  ylab('Estimated annual mg/kg AM') +
+  theme_minimal()
+
+# note - this is for a 100 cow increase
+res %>%
+  summarise_all(~mean(., na.rm = T)) %>%
+  select(diff, diff_low, diff_upp)
+
+
+```
+14.728725064	13.26937174	
+
+
+### Var 5 - Parity
+```{r, fig.height= 3, fig.width=5}
+pred <- seq(min(synergy_RF_unscaled$mu_parity, na.rm = T),
+                max(synergy_RF_unscaled$mu_parity , na.rm = T), 1)
+pred
+new_data <- total_mgkg_7_pred_model$data[1:length(pred),] %>%
+  mutate(total_mgkg_esvac_LOG = NA,
+         herd_size = mean(total_mgkg_7_pred_model$data$herd_size),
+         n_visits = mean(total_mgkg_7_pred_model$data$n_visits),
+         prop_herd_DCT_T = mean(total_mgkg_7_pred_model$data$prop_herd_DCT_T), 
+         total_prod_per_cow.y = mean(total_mgkg_7_pred_model$data$total_prod_per_cow.y),
+         mu_parity = pred,
+         year = NA, 
+         premises_id = NA)
+
+res <- cbind(new_data,
+      fitted(total_mgkg_7_pred_model,
+       newdata  = new_data,
+       re_formula = NA)) %>%
+  select(mu_parity, Estimate, Q2.5, Q97.5) %>%
+  mutate(exp_est = exp(Estimate),
+         lag_exp_est = lag(exp_est),
+         diff = exp_est/lag_exp_est,
+         exp_low = exp(Q2.5),
+         lag_exp_low = lag(exp_low),
+         diff_low = exp_low/lag_exp_low,
+         exp_upp = exp(Q97.5),
+         lag_exp_upp = lag(exp_upp),
+         diff_upp = exp_upp/lag_exp_upp) 
+
+res %>%
+  ggplot() +
+  geom_line(aes(y = exp(Estimate), x = mu_parity), colour = dual_blues[2], size = 1.5) +
+  geom_ribbon(aes(ymin = exp(Q2.5), ymax = exp(Q97.5), x = mu_parity), alpha = 0.3, fill = dual_blues[2]) +
+  xlab('Mean parity') +
+  ylab('Estimated annual mg/kg AM') +
+  theme_minimal()
+
+# note - this is for a 100 cow increase
+res %>%
+  summarise_all(~mean(., na.rm = T)) %>%
+  select(diff, diff_low, diff_upp)
+res
+```
+
+```{r, fig.width = 6, fig.height = 3}
+synergy_RF_unscaled <- readRDS(paste0(path, 'synergy_RF_unscaled.Rds'))
+
+residuals <- cbind(total_mgkg_7_pred_model$data, fitted(total_mgkg_7_pred_model)) %>%
+  mutate(mu = Estimate - total_mgkg_esvac_O,
+         low = Q2.5 - total_mgkg_esvac_O,
+         upp = Q97.5- total_mgkg_esvac_O) %>%
+  left_join(synergy_RF_unscaled, by = c('year','premises_id')) 
+  
+residuals %>%
+  ggplot() +
+  geom_point(aes(x = total_mgkg_esvac, y = mu), alpha = 0.2) +
+  geom_errorbar(aes(x = total_mgkg_esvac, ymax = upp, ymin = low), alpha = 0.3, colour = dual_blues[1]) +
+  geom_hline(aes(yintercept = 0), linetype = 2, colour = 'red') +
+  scale_x_continuous(trans = 'log10') +
+  theme_minimal() +
+  ylab('Residual') +
+  xlab('Total mg/kg AMU') 
+
+```
+
+
+```{r, fig.width = 4, fig.height = 2}
+residuals %>%
+  select(total_mgkg_esvac, mu, low, upp) %>%
+  gather(key = 'stat', value = 'res', -total_mgkg_esvac) %>%
+  ggplot() +
+  geom_histogram(aes(x = res), fill = dual_blues[2], alpha = 0.7) +
+  xlab('Residual') +
+  ylab('Count') +
+  theme_minimal() +
+  geom_vline(aes(xintercept = 0), colour = 'darkgrey', linetype = 2)
+
+```
+
+

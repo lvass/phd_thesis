@@ -1,0 +1,8 @@
+---
+title: "High varience group effects = fixed effects"
+output: html_notebook
+---
+
+Aim: Assess if using group effects with high variance produces the same results as fixed effects
+- Plots for appendix
+- Test same models as in "underlying_model_structure.Rmd"

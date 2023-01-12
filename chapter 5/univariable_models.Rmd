@@ -1,0 +1,699 @@
+---
+title: "Model building - temperature effect part A"
+output: html_notebook
+---
+
+Part A
+Split models for 'collecting yard' and 'heifers'
+Univariable analysis
+
+Predictors:
+- Intercept only
+- Spline to demonstrate seasonal effects
+- Air temperature (1 week)
+- Humidity (1 week)
+
+Results - display as table only
+
+# Set-up
+```{r}
+library(tidyverse)
+library(brms)
+options(mc.cores = 8, brms.backend = "cmdstanr") # allows threading
+library(tryCatchLog)
+library(loo)
+library(lubridate)
+library(tidybayes)
+```
+
+# Paths
+```{r}
+datapath <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/rds_rda/modelling_uncertainty/data_with_locations/'
+savepath <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/rds_rda/final_models_new/'
+```
+
+# Functions
+### Creating formula
+```{r}
+make_formula_poisson_var <- function(rf_formula){
+  
+  model_formula <- bf(count ~ main + am * log_inv_logit(interaction),nl=TRUE)
+  model_formula <- model_formula + lf(main ~ offset(log_dilution) + (1|assay)) 
+  model_formula <- model_formula + lf(paste("interaction ~ ", as.character(rf_formula)))
+  
+  return(model_formula)
+}
+
+```
+
+
+### Computing model
+```{r}
+run_possion_model <- function(data, model_formula, savepath, savename, chain_length){
+    if (is.na(chain_length)){
+      chain_length <- 4000
+    }
+  
+    custom_priors_highvar <- c(
+      set_prior('normal(0, 5)', class = 'b', nlpar = 'interaction'), 
+      set_prior('normal(0, 5)', class = 'b', nlpar = 'main'),
+      set_prior('normal(10, 1)', class = 'sd', nlpar = 'interaction', group = 'assay'), # prevents this wide prior on 'true' random effects which we want with low var
+      set_prior('normal(10, 1)', class = 'sd', nlpar = 'main')# fix variance high using normal dist
+    )
+    
+  start_time <- Sys.time()
+  
+  options(mc.cores = 8, brms.backend = "cmdstanr") # allows threading
+
+  model <- brm(
+    formula = model_formula,
+    data = as.data.frame(data), 
+    family = poisson(), 
+    prior = custom_priors_highvar,
+    iter = chain_length, warmup = chain_length/2, chains = 4, cores = 4,
+    silent = F,
+    backend = "cmdstanr",
+    threads = threading(2) #8 cores used 
+    )
+  
+  end_time <- Sys.time()
+  print(end_time - start_time)
+  
+  saveRDS(model, paste0(savepath, savename))
+  
+  return(model)
+}
+
+```
+
+# Creating data
+```{r}
+create_split_data <- function(am_name){
+  df1 <- readRDS(paste0(datapath, 'df1_', am_name, '_brms.Rds'))
+  
+  df1 <- df1 %>%
+    mutate(study_day_effect = as.numeric(date - min(df1$date)))
+  
+  max_day <- max(df1$study_day_effect)
+    
+  df1 <- df1 %>%
+    mutate(study_day_effect = (max_day - study_day_effect)/max_day)
+  
+  yard <- df1 %>%
+    filter(location_age == 'collecting_yard_adult')
+  
+  shed <- df1 %>%
+    filter(location_age == 'shed_pen_heifer')
+  
+  saveRDS(yard, paste0(datapath, 'df1_yard_', am_name, '_brms.Rds'))
+  saveRDS(shed, paste0(datapath, 'df1_shed_', am_name, '_brms.Rds'))
+}
+
+# Amox
+create_split_data('amox')
+# Ceph
+create_split_data('ceph')
+# Cipro
+create_split_data('cipro')
+# Strep
+create_split_data('strep')
+# Tetra
+create_split_data('tetra')
+
+readRDS(paste0(datapath, 'df1_yard_', 'amox', '_brms.Rds'))
+readRDS(paste0(datapath, 'df1_shed_', 'amox', '_brms.Rds'))
+
+df1 <- readRDS(paste0(datapath, 'df1_', 'amox', '_brms.Rds'))
+df1 %>%
+  filter(plate == 'plain') %>%
+  count(location_cat, age_cat)
+
+mu_temp <- mean(df1$mean_week_temperature)
+sd_temp <- sd(df1$mean_week_temperature)
+mu_hum <- mean(df1$mean_week_humidity/100)
+sd_hum  <- sd(df1$mean_week_humidity/100)
+
+```
+
+
+# Missing data
+```{r, fig.width = 4, fig.height=2}
+df1_with_no_bac_assays <- readRDS(paste0(datapath, 'df1_with_no_bac_assays.Rds'))
+df1_yard_amox <- readRDS(paste0(datapath, 'df1_yard_', 'amox', '_brms.Rds'))
+df1_shed_amox <- readRDS(paste0(datapath, 'df1_shed_', 'amox', '_brms.Rds'))
+
+no_bac_yard <- df1_with_no_bac_assays %>%
+  filter(assay %in% c(df1_yard_amox$assay))
+
+no_bac_shed <- df1_with_no_bac_assays %>%
+  filter(assay %in% c(df1_shed_amox$assay))
+
+saveRDS(no_bac_yard, paste0(datapath, 'df1_no_bac_yard.Rds'))
+saveRDS(no_bac_shed, paste0(datapath, 'df1_no_bac_shed.Rds'))
+
+no_bac <- rbind(no_bac_yard, no_bac_shed)
+df1_combined <- rbind(df1_yard_amox, df1_shed_amox) %>%
+  filter(plate == 'plain')
+
+no_bac %>%
+  ggplot(aes(x = mean_week_temperature, y= log10p1(..count..))) +
+  geom_histogram(data = df1_combined, alpha = 0.5) +
+  geom_histogram(fill = 'red', alpha = 0.5) +
+  theme_minimal()+
+  xlab('Air temperature (celsius)')+
+  ylab('Count (log10)')
+
+no_bac %>%
+  ggplot(aes(x = mean_week_humidity, y= log10p1(..count..))) +
+  geom_histogram(data = df1_combined, alpha = 0.5) +
+  geom_histogram(fill = 'red', alpha = 0.5) +
+  theme_minimal() +
+  xlab('Relative humidity (%)') +
+  ylab('Count (log10)')
+
+df1_with_no_bac_assays %>%
+  count(location_cat)
+
+df1_ceph_brms_just_plain %>%
+  count(location_cat)
+```
+```{r}
+df1_yard_amox_edit <- df1_yard_amox %>%
+  filter(am ==0) %>%
+  mutate(nearest_month = floor_date(date, unit = 'months')) %>%
+  group_by(farm, nearest_month) %>%
+  summarise(n = n(),
+            mu_bac_abun = mean(count))
+df1_shed_amox_edit <- df1_shed_amox  %>%
+  filter(am ==0) %>%
+  mutate(nearest_month = floor_date(date, unit = 'months')) %>%
+  group_by(farm, nearest_month) %>%
+  summarise(n = n(),
+            mu_bac_abun = mean(count))
+
+median(df1_yard_amox_edit$n)
+median(df1_shed_amox_edit$n)
+
+ggplot() +
+  geom_line(data = df1_shed_amox_edit, aes(x = nearest_month, y = n), colour = dual_blues[2]) +
+  geom_line(data = df1_yard_amox_edit, aes(x = nearest_month, y = n), colour = dual_greens[2]) 
+
+
+ggplot() +
+  geom_line(data = df1_shed_amox_edit, aes(x = nearest_month, y = mu_bac_abun), colour = dual_blues[2]) +
+  geom_line(data = df1_yard_amox_edit, aes(x = nearest_month, y = mu_bac_abun), colour = dual_greens[2]) 
+
+df1_yard_amox %>%
+  mutate(month = month(date)) %>%
+  filter(am == 0) %>%
+  group_by(month) %>%
+  summarise(mu_bac_abun = median(count))
+
+df1_shed_amox %>%
+  mutate(month = month(date)) %>%
+  filter(am == 0) %>%
+  group_by(month) %>%
+  summarise(mu_bac_abun = median(count))
+
+cor((df1_yard_amox %>% filter(am == 0))$count, (df1_yard_amox %>% filter(am == 0))$temperature_daily_mean) 
+cor((df1_shed_amox %>% filter(am == 0))$count, (df1_shed_amox %>% filter(am == 0))$temperature_daily_mean) 
+
+df1_shed_amox_edit
+
+median((df1_shed_amox %>%
+  group_by(farm) %>%
+  summarise(min_date = min(date),
+            max_date = max(date),
+            diff = as.numeric(max_date - min_date)/365))$diff)
+
+1.632877
+1.213699
+```
+
+# Running intercept only
+```{r}
+run_intercept_only <- function(df, save_name){
+  model <- tryLog(run_possion_model(data = df,
+                  model_formula = make_formula_poisson_var('1 + (1|location_id) + (1|farm) + (1|assay)'),
+                  savepath,
+                  savename = paste0('int_only_A0_', save_name, '.Rds'),
+                  chain_length = 2000))
+  return(summary(model))
+  rm(model)
+}
+
+df1_yard_amox <- readRDS(paste0(datapath, 'df1_yard_', 'amox', '_brms.Rds'))
+df1_shed_amox <- readRDS(paste0(datapath, 'df1_shed_', 'amox', '_brms.Rds'))
+df1_yard_ceph <- readRDS(paste0(datapath, 'df1_yard_', 'ceph', '_brms.Rds'))
+df1_shed_ceph <- readRDS(paste0(datapath, 'df1_shed_', 'ceph', '_brms.Rds'))
+df1_yard_cipro <- readRDS(paste0(datapath, 'df1_yard_', 'cipro', '_brms.Rds'))
+df1_shed_cipro <- readRDS(paste0(datapath, 'df1_shed_', 'cipro', '_brms.Rds'))
+df1_yard_strep <- readRDS(paste0(datapath, 'df1_yard_', 'strep', '_brms.Rds'))
+df1_shed_strep <- readRDS(paste0(datapath, 'df1_shed_', 'strep', '_brms.Rds'))
+df1_yard_tetra <- readRDS(paste0(datapath, 'df1_yard_', 'tetra', '_brms.Rds'))
+df1_shed_tetra <- readRDS(paste0(datapath, 'df1_shed_', 'tetra', '_brms.Rds'))
+
+run_intercept_only(df1_yard_amox, 'yard_amox')
+run_intercept_only(df1_shed_amox, 'shed_amox')
+
+run_intercept_only(df1_yard_ceph, 'yard_ceph')
+run_intercept_only(df1_shed_ceph, 'shed_ceph')
+
+run_intercept_only(df1_yard_cipro, 'yard_cipro')
+run_intercept_only(df1_shed_cipro, 'shed_cipro')
+
+run_intercept_only(df1_yard_strep, 'yard_strep')
+run_intercept_only(df1_shed_strep, 'shed_strep')
+
+run_intercept_only(df1_shed_tetra, 'shed_tetra')
+run_intercept_only(df1_yard_tetra, 'yard_tetra')
+
+```
+
+
+# Running temp only
+```{r}
+run_temp_only <- function(df, save_name){
+  model <- tryLog(run_possion_model(data = df,
+                  model_formula = make_formula_poisson_var('mean_week_temperature_S + (1|location_id) + (1|farm) + (1|assay)'),
+                  savepath,
+                  savename = paste0('temp_only_A1_', save_name, '.Rds'),
+                  chain_length = 2000))
+  return(summary(model))
+  rm(model)
+}
+
+
+run_temp_only(df1_yard_amox, 'yard_amox')
+run_temp_only(df1_shed_amox, 'shed_amox')
+
+run_temp_only(df1_yard_ceph, 'yard_ceph')
+run_temp_only(df1_shed_ceph, 'shed_ceph')
+
+run_temp_only(df1_yard_cipro, 'yard_cipro')
+run_temp_only(df1_shed_cipro, 'shed_cipro')
+
+run_temp_only(df1_yard_strep, 'yard_strep')
+run_temp_only(df1_shed_strep, 'shed_strep')
+
+run_temp_only(df1_shed_tetra, 'shed_tetra')
+run_temp_only(df1_yard_tetra, 'yard_tetra')
+
+```
+
+
+# Running humidity only
+```{r}
+run_hum_only <- function(df, save_name){
+  model <- tryLog(run_possion_model(data = df,
+                  model_formula = make_formula_poisson_var('mean_week_humidity_S + (1|location_id) + (1|farm) + (1|assay)'),
+                  savepath,
+                  savename = paste0('hum_only_A2_', save_name, '.Rds'),
+                  chain_length = 2000))
+  return(summary(model))
+  rm(model)
+}
+
+
+run_hum_only(df1_yard_amox, 'yard_amox')
+run_hum_only(df1_shed_amox, 'shed_amox')
+
+run_hum_only(df1_yard_ceph, 'yard_ceph')
+run_hum_only(df1_shed_ceph, 'shed_ceph')
+
+run_hum_only(df1_yard_cipro, 'yard_cipro')
+run_hum_only(df1_shed_cipro, 'shed_cipro')
+
+run_hum_only(df1_yard_strep, 'yard_strep')
+run_hum_only(df1_shed_strep, 'shed_strep')
+
+run_hum_only(df1_shed_tetra, 'shed_tetra')
+run_hum_only(df1_yard_tetra, 'yard_tetra')
+
+```
+
+
+
+
+
+
+
+season_spline_plot <- function(model, data){
+  
+  model <- readRDS(paste0(save_collecting_yard_adult_ceph_model
+  
+  new_data <- collecting_yard_adult_ceph_model$data %>%
+    mutate(assay = NA, farm = NA, location_id = NA,
+           mean_week_temperature_S = 0,
+           mean_week_humidity_S = 0)
+           
+  new_data
+  estimates <- as_tibble(inv_logit_scaled(fitted(collecting_yard_adult_ceph_model,
+                      newdata = new_data,
+                      re_formula = NA,
+                      nlpar = 'interaction')))
+  
+  assays <- as_tibble(inv_logit_scaled(fitted(collecting_yard_adult_ceph_model,
+                      re_formula = NULL,
+                      nlpar = 'interaction'))) %>%
+    distinct()
+  
+  names(assays) <- paste0('assay_', names(assays))
+  
+  res <- cbind(estimates, collecting_yard_adult_ceph_model$data) %>%
+    filter(am == 0)
+  assays <- cbind(assays, collecting_yard_adult_ceph_model$data) %>%
+    filter(am == 0)
+  res
+  assays
+  final_res <- res %>%
+    left_join(collecting_yard_adult_ceph, by = 'assay') %>%
+    left_join(assays, by = 'assay') %>%
+    distinct()
+  
+  spline_plot <- final_res %>%
+    ggplot() +
+    geom_line(aes(x = date, y = Estimate)) +
+    geom_ribbon(aes(x =  date, ymin = Q2.5, ymax = Q97.5), alpha = 0.3) +
+    geom_point(aes(y = assay_Estimate, x = date), alpha = 0.1) +
+    scale_y_continuous(trans = 'log10') +
+    xlab('Date') +
+    ylab('Estimated proportion resistant')
+  
+  temp <- final_res %>%
+    ggplot() +
+    geom_line(aes(x = date, y = mean_week_temperature_S), colour = 'blue')
+  
+  humid <- final_res %>%
+    ggplot() +
+    geom_line(aes(x = date, y = mean_week_humidity_S), colour = 'green')
+  
+  gridExtra::grid.arrange(spline_plot, temp, humid, nrow = 3)
+  
+  spline_plot
+  
+}
+
+collecting_yard_adult_ceph_model <- tryLog(run_possion_model(data = collecting_yard_adult_ceph,
+                  model_formula = make_formula_poisson_var('mean_week_temperature_S + mean_week_humidity_S + s(study_day_effect, bs ="gp") + (1|location_id) + (1|farm) + (1|assay)'),
+                  savepath,
+                  savename = 'sep_agegroups_model1.Rds'))
+summary(collecting_yard_adult_ceph_model)
+
+shed_pen_heifer_ceph_model <- tryLog(run_possion_model(data = shed_pen_heifer_ceph,
+                  model_formula = make_formula_poisson_var('mean_week_temperature_S + mean_week_humidity_S + s(study_day_effect, bs ="gp") + (1|location_id) + (1|farm) + (1|assay)'),
+                  savepath,
+                  savename = 'sep_agegroups_model2.Rds'))
+
+adults_only_ceph_model <- tryLog(run_possion_model(data = adults_only_ceph,
+                  model_formula = make_formula_poisson_var('mean_week_temperature_S:location_cat + mean_week_temperature_S + location_cat + s(study_day_effect, bs ="gp") + (1|location_id) + (1|farm) + (1|assay)'),
+                  savepath,
+                  savename = 'sep_agegroups_model3.Rds'))
+
+summary(adults_only_ceph_model)
+
+
+adults_by_loc <- adults_only_ceph_model %>%
+  spread_draws(`b_interaction_mean_week_temperature_S:location_catcollecting_yard`, 
+               `b_interaction_mean_week_temperature_S:location_catcubicles`,
+               `b_interaction_mean_week_temperature_S:location_catshed_pen`) %>%
+  select(-.draw, -.chain, -.iteration)
+
+names(adults_by_loc) <- c('Temperature:collecting yard', 'Temperature:Cubicles', 'Temperature:ShedPen')
+
+adults_by_loc %>%
+  gather('predictor', 'coef') %>%
+  ggplot() +
+  stat_halfeye(aes(x = coef, y= predictor)) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  xlab('Coefficient estimate') +
+  ylab('Predictor')
+  
+  
+
+h <- shed_pen_heifer_ceph_model %>%
+  spread_draws(b_interaction_mean_week_temperature_S) %>%
+  mutate(model = 'heifer (shed/pen)')
+
+a <- collecting_yard_adult_ceph_model %>%
+    spread_draws(b_interaction_mean_week_temperature_S) %>%
+    mutate(model = 'asult(collecting yard)')
+
+rbind(h, a) %>%
+  ggplot() +
+  stat_halfeye(aes(x = b_interaction_mean_week_temperature_S, y= model)) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  xlab('Temperature (7 day mean)') +
+  ylab('Model')
+
+
+h <- shed_pen_heifer_ceph_model %>%
+  spread_draws(b_interaction_mean_week_humidity_S) %>%
+  mutate(model = 'heifer (shed/pen)')
+
+a <- collecting_yard_adult_ceph_model %>%
+    spread_draws(b_interaction_mean_week_humidity_S) %>%
+    mutate(model = 'adult (collecting yard)')
+
+rbind(h, a) %>%
+  ggplot() +
+  stat_halfeye(aes(x = b_interaction_mean_week_humidity_S, y= model)) 
+
+rbind(h, a) %>%
+  ggplot() +
+  stat_halfeye(aes(x = b_interaction_mean_week_humidity_S, y= model)) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  xlab('Humidity (7 day mean)') +
+  ylab('Model')
+
+
+
+summary(shed_pen_heifer_ceph_model)
+summary(collecting_yard_adult_ceph_model)
+
+collecting_yard_adult_ceph_model
+
+new_data <- collecting_yard_adult_ceph_model$data %>%
+  mutate(assay = NA, farm = NA, location_id = NA,
+         mean_week_temperature_S = 0,
+         mean_week_humidity_S = 0)
+         
+new_data
+estimates <- as_tibble(inv_logit_scaled(fitted(collecting_yard_adult_ceph_model,
+                    newdata = new_data,
+                    re_formula = NA,
+                    nlpar = 'interaction')))
+
+assays <- as_tibble(inv_logit_scaled(fitted(collecting_yard_adult_ceph_model,
+                    re_formula = NULL,
+                    nlpar = 'interaction'))) %>%
+  distinct()
+
+names(assays) <- paste0('assay_', names(assays))
+
+res <- cbind(estimates, collecting_yard_adult_ceph_model$data) %>%
+  filter(am == 0)
+assays <- cbind(assays, collecting_yard_adult_ceph_model$data) %>%
+  filter(am == 0)
+res
+assays
+final_res <- res %>%
+  left_join(collecting_yard_adult_ceph, by = 'assay') %>%
+  left_join(assays, by = 'assay') %>%
+  distinct()
+
+spline_plot <- final_res %>%
+  ggplot() +
+  geom_line(aes(x = date, y = Estimate)) +
+  geom_ribbon(aes(x =  date, ymin = Q2.5, ymax = Q97.5), alpha = 0.3) +
+  geom_point(aes(y = assay_Estimate, x = date), alpha = 0.1) +
+  scale_y_continuous(trans = 'log10') +
+  xlab('Date') +
+  ylab('Estimated proportion resistant')
+
+temp <- final_res %>%
+  ggplot() +
+  geom_line(aes(x = date, y = mean_week_temperature_S), colour = 'blue')
+
+humid <- final_res %>%
+  ggplot() +
+  geom_line(aes(x = date, y = mean_week_humidity_S), colour = 'green')
+
+gridExtra::grid.arrange(spline_plot, temp, humid, nrow = 3)
+
+spline_plot
+
+# Results table
+```{r}
+calc_effect_size <- function(model, am, location, predictor){
+  if(predictor == 'temp'){
+    res <- model  %>%
+      spread_draws(b_interaction_mean_week_temperature_S) %>%
+      mutate(model = as.factor(am),
+             location = as.factor(location)) %>%
+      select(-.chain, -.iteration, -.draw)
+  }
+  if(predictor == 'hum'){
+    res <- model  %>%
+      spread_draws(b_interaction_mean_week_humidity_S) %>%
+      mutate(model = as.factor(am),
+             location = as.factor(location)) %>%
+      select(-.chain, -.iteration, -.draw)
+  }
+  return(res)
+}
+
+id <- 'B5'
+
+amox_yard_A1_temp <- readRDS(paste0(savepath, 'temp_only_A1_', 'yard_amox', '.Rds'))
+amox_shed_A1_temp <- readRDS(paste0(savepath, 'temp_only_A1_', 'shed_amox', '.Rds'))
+ceph_yard_A1_temp <- readRDS(paste0(savepath, 'temp_only_A1_', 'yard_ceph', '.Rds'))
+ceph_shed_A1_temp <- readRDS(paste0(savepath, 'temp_only_A1_', 'shed_ceph', '.Rds'))
+cipro_yard_A1_temp <- readRDS(paste0(savepath, 'temp_only_A1_', 'yard_cipro', '.Rds'))
+cipro_shed_A1_temp <- readRDS(paste0(savepath, 'temp_only_A1_', 'shed_cipro', '.Rds'))
+strep_yard_A1_temp <- readRDS(paste0(savepath, 'temp_only_A1_', 'yard_strep', '.Rds'))
+strep_shed_A1_temp <- readRDS(paste0(savepath, 'temp_only_A1_', 'shed_strep', '.Rds'))
+tetra_yard_A1_temp <- readRDS(paste0(savepath, 'temp_only_A1_', 'yard_tetra', '.Rds'))
+tetra_shed_A1_temp <- readRDS(paste0(savepath, 'temp_only_A1_', 'shed_tetra', '.Rds'))
+
+amox_yard_A2_hum <- readRDS(paste0(savepath, 'hum_only_A2_', 'yard_amox', '.Rds'))
+amox_shed_A2_hum <- readRDS(paste0(savepath, 'hum_only_A2_', 'shed_amox', '.Rds'))
+ceph_yard_A2_hum <- readRDS(paste0(savepath, 'hum_only_A2_', 'yard_ceph', '.Rds'))
+ceph_shed_A2_hum <- readRDS(paste0(savepath, 'hum_only_A2_', 'shed_ceph', '.Rds'))
+cipro_yard_A2_hum <- readRDS(paste0(savepath, 'hum_only_A2_', 'yard_cipro', '.Rds'))
+cipro_shed_A2_hum <- readRDS(paste0(savepath, 'hum_only_A2_', 'shed_cipro', '.Rds'))
+strep_yard_A2_hum <- readRDS(paste0(savepath, 'hum_only_A2_', 'yard_strep', '.Rds'))
+strep_shed_A2_hum <- readRDS(paste0(savepath, 'hum_only_A2_', 'shed_strep', '.Rds'))
+tetra_yard_A2_hum <- readRDS(paste0(savepath, 'hum_only_A2_', 'yard_tetra', '.Rds'))
+tetra_shed_A2_hum <- readRDS(paste0(savepath, 'hum_only_A2_', 'shed_tetra', '.Rds'))
+
+ 
+all_ams_temp <- rbind(calc_effect_size(amox_yard_A1_temp, 'Amoxicillin', 'yard', 'temp'),
+                          calc_effect_size(amox_shed_A1_temp, 'Amoxicillin', 'shed', 'temp'),
+                          calc_effect_size(ceph_yard_A1_temp, 'Cephalexin', 'yard', 'temp'),
+                          calc_effect_size(ceph_shed_A1_temp, 'Cephalexin', 'shed', 'temp'),
+                          calc_effect_size(cipro_yard_A1_temp, 'Ciprofloxacin', 'yard', 'temp'),
+                          calc_effect_size(cipro_shed_A1_temp, 'Ciprofloxacin', 'shed', 'temp'),
+                          calc_effect_size(strep_yard_A1_temp, 'Streptomycin', 'yard', 'temp'),
+                          calc_effect_size(strep_shed_A1_temp, 'Streptomycin', 'shed', 'temp'),
+                         # calc_effect_size_LOC(tetra_yard_A1_temp, 'Tetracycline', 'yard', 'temp'),
+                          calc_effect_size(tetra_shed_A1_temp, 'Tetracycline', 'shed', 'temp'))
+
+levels(all_ams_temp$location) <- c('Adults in collecting yard', 'Heifers in sheds/pens')
+
+all_ams_hum <- rbind(calc_effect_size(amox_yard_A2_hum, 'Amoxicillin', 'yard', 'hum'),
+                          calc_effect_size(amox_shed_A2_hum, 'Amoxicillin', 'shed', 'hum'),
+                          calc_effect_size(ceph_yard_A2_hum, 'Cephalexin', 'yard', 'hum'),
+                          calc_effect_size(ceph_shed_A2_hum, 'Cephalexin', 'shed', 'hum'),
+                          calc_effect_size(cipro_yard_A2_hum, 'Ciprofloxacin', 'yard', 'hum'),
+                          calc_effect_size(cipro_shed_A2_hum, 'Ciprofloxacin', 'shed', 'hum'),
+                          calc_effect_size(strep_yard_A2_hum, 'Streptomycin', 'yard', 'hum'),
+                          calc_effect_size(strep_shed_A2_hum, 'Streptomycin', 'shed', 'hum'),
+                         # calc_effect_size_LOC(tetra_yard_A2_hum, 'Tetracycline', 'yard', 'hum'),
+                          calc_effect_size(tetra_shed_A2_hum, 'Tetracycline', 'shed', 'hum'))
+
+levels(all_ams_hum$location) <- c('Adults in collecting yard', 'Heifers in sheds/pens')
+
+median_and_CIs <- function(data){
+  med <- as.character(round(median(data), 3))
+  upp <- as.character(round(quantile(data, 0.975), 3))
+  low <- as.character(round(quantile(data, 0.025), 3))
+  sig <- ' '
+  if((upp > 0 & low > 0) | (upp < 0 & low < 0) ){
+    sig <- '*'
+  }
+  
+  return(paste0(med, ' (', low, ', ', upp, ')  ', sig))
+}
+
+res_table_temp <- all_ams_temp %>%
+  group_by(model, location) %>%
+  summarise(temp_coef = median_and_CIs(b_interaction_mean_week_temperature_S))
+
+res_table_hum <- all_ams_hum %>%
+  group_by(model, location) %>%
+  summarise(hum_coef = median_and_CIs(b_interaction_mean_week_humidity_S))
+
+res_table <- res_table_temp %>%
+  left_join(res_table_hum, by = c('model', 'location'))
+
+write.csv(res_table, paste0(savepath, 'uni_var_results.csv'))
+
+calc_effect_size(tetra_yard_A2_hum, 'Tetracycline', 'yard', 'hum') %>%
+  group_by(model, location) %>%
+  summarise(hum_coef = median_and_CIs(b_interaction_mean_week_humidity_S))
+```
+
+# Intercept only results
+```{r}
+amox_yard_A0_int <- readRDS(paste0(savepath, 'int_only_A0_', 'yard_amox', '.Rds'))
+amox_yard_A0_int
+
+new_data <- tibble(
+    'mean_week_humidity_S' = rep(c(hum_1, hum_2), 2),
+    'am' = c(rep(0, 2), rep(1, 2)),
+    'assay' = NA,
+    'log_dilution' = c(rep(log(0.1), 2), rep(0, 2)),
+    'location_id' = NA,
+    'farm' = NA)
+
+get_assay_ests <- function(model, am, location){
+  assay_res <- as.tibble(inv_logit_scaled(fitted(model,
+         nlpar = 'interaction',
+         re_formula = NULL,
+         summary = T
+         )))%>%
+  distinct() %>%
+  mutate(model = as.factor(am), 
+         location = as.factor(location))
+  
+  return(assay_res)
+}
+
+yard_amox <- readRDS(paste0(savepath, 'int_only_A0_', 'yard_amox', '.Rds'))
+shed_amox <- readRDS(paste0(savepath, 'int_only_A0_', 'shed_amox', '.Rds'))
+yard_ceph <- readRDS(paste0(savepath, 'int_only_A0_', 'yard_ceph', '.Rds'))
+shed_ceph <- readRDS(paste0(savepath, 'int_only_A0_', 'shed_ceph', '.Rds'))
+yard_cipro <- readRDS(paste0(savepath, 'int_only_A0_', 'yard_cipro', '.Rds'))
+shed_cipro <- readRDS(paste0(savepath, 'int_only_A0_', 'shed_cipro', '.Rds'))
+yard_strep <- readRDS(paste0(savepath, 'int_only_A0_', 'yard_strep', '.Rds'))
+shed_strep <- readRDS(paste0(savepath, 'int_only_A0_', 'shed_strep', '.Rds'))
+yard_tetra <- readRDS(paste0(savepath, 'int_only_A0_', 'yard_tetra', '.Rds'))
+shed_tetra <- readRDS(paste0(savepath, 'int_only_A0_', 'shed_tetra', '.Rds'))
+
+all_assay_ests <- rbind(get_assay_ests(yard_amox, 'Amoxicillin', 'yard'),
+                        get_assay_ests(shed_amox, 'Amoxicillin', 'shed'),
+                        get_assay_ests(yard_ceph, 'Cephalexin', 'yard'),
+                        get_assay_ests(shed_ceph, 'Cephalexin', 'shed'),
+                        get_assay_ests(yard_cipro, 'Ciprofloxacin', 'yard'),
+                        get_assay_ests(shed_cipro, 'Ciprofloxacin', 'shed'),
+                        get_assay_ests(yard_strep, 'Streptomycin', 'yard'),
+                        get_assay_ests(shed_strep, 'Streptomycin', 'shed'),
+                        get_assay_ests(yard_tetra, 'Tetracycline', 'yard'),
+                        get_assay_ests(shed_tetra, 'Tetracycline', 'shed'))
+  
+
+all_assay_ests
+```
+
+
+```{r, fig.width = 5, fig.height = 3}
+all_assay_ests %>%
+  ggplot() +
+  stat_dist_eye(aes(y = Estimate, x = model, fill = location), alpha = 0.5, position = 'dodge') +
+  scale_y_continuous(trans = 'log10') +
+  scale_fill_manual(values = c(dual_greens[2], dual_blues[2])) +
+  theme_minimal() +
+  ylab('Estimated proportion resistant') +
+  xlab('Antimicrobial')
+
+summary_tab <- all_assay_ests %>%
+  group_by(model, location) %>%
+  summarise(median(Estimate),
+            quantile(Estimate, 0.25),
+            quantile(Estimate, 0.75))
+
+write.csv(summary_tab, paste0(savepath, 'summary_tab_median_res.csv'))
+
+```
+

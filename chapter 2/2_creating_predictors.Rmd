@@ -1,0 +1,449 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Create predictors, tidy and join into a final RF dataset - '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/synergy/data/synergy_RF.Rds'
+
+### Load libraries and path
+```{r}
+library(tidyverse)
+library(lubridate)
+
+path <- "/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/synergy/data/"
+```
+
+```{r}
+mg_kg_outcomes_all_tidy_no_outlier <- readRDS(paste0(path, 'mg_kg_outcomes_all_tidy_no_outlier.Rds'))
+
+herd_years_in_df <- mg_kg_outcomes_all_tidy_no_outlier %>%
+  select(premises_year, premises_id, interherd_premises_id, region, year)
+
+premises_year_spine <- tibble(premises_year = unique(herd_years_in_df$premises_year))
+premises_year_spine # 934
+
+
+```
+
+### 1) Number of purchases
+```{r}
+synergy_abs_mgkg_tidy <- readRDS(paste0(path, 'synergy_abs_mgkg_tidy.Rds'))
+
+n_visits_df <- synergy_abs_mgkg_tidy %>%
+  select(premises_year, visit_id) %>%
+  distinct() %>%
+  group_by(premises_year) %>%
+  summarise(n_visits = n()) 
+
+n_visits_df %>%
+  ggplot() +
+  geom_histogram(aes(n_visits))
+
+n_visits_df <- premises_year_spine %>%
+  left_join(n_visits_df, by = 'premises_year') %>%
+  distinct()
+```
+
+### 2) Most commonly used vet
+```{r}
+synergy_abs_mgkg_tidy <- readRDS(paste0(path, 'synergy_abs_mgkg_tidy.Rds'))
+synergy_abs_mgkg_tidy
+
+# from: https://www.tutorialspoint.com/r/r_mean_median_mode.htm
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+synergy_abs_mgkg_tidy %>%
+  count(premises_year, vet_id) 
+  
+vet_used <- synergy_abs_mgkg_tidy %>%
+  group_by(premises_year) %>%
+  summarise(most_common_vet = getmode(vet_id))
+
+vet_used %>%
+  count(premises_year) %>%
+  filter(n !=1)
+
+vet_used <- premises_year_spine %>%
+  left_join(vet_used, by = 'premises_year') %>%
+  distinct()
+
+vet_used
+```
+
+### 3) Proportion of herd recieving DCT in previous year
+```{r}
+synergy_abs_mgkg_tidy <- readRDS(paste0(path, 'synergy_abs_mgkg_tidy.Rds'))
+
+all_premises_years <- tibble('premises_year' = unique(synergy_abs_mgkg_tidy$premises_year))
+
+years_with_DCT <- synergy_abs_mgkg_tidy %>% #1,099
+  filter(im_type == 'DCT') %>%
+  count(premises_year)
+
+years_with_no_DCT <- all_premises_years %>% # 135
+  left_join(years_with_DCT, by = 'premises_year') %>%
+  filter(is.na(n)) %>%
+  mutate(prop_herd_DCT = 0) %>%
+  select(-n)
+
+prop_herd_DCT_current_year <- synergy_abs_mgkg_tidy %>% 
+  filter(im_type == 'DCT') %>% # years will no DCT sales won't show
+  mutate(tubes_sold = quantity * unit_correction) %>%
+  group_by(premises_year, premises_id, year) %>% # rolling_12_month_av is herd size rolling so monthly
+  summarise(sum_tubes = sum(tubes_sold, na.rm = T),
+            mean_herd_size = mean(rolling_12_month_av)) %>%
+  mutate(DCT_doses_sold = sum_tubes/4,
+         prop_herd_DCT = DCT_doses_sold/mean_herd_size,
+         prop_herd_DCT = ifelse(prop_herd_DCT > 1, 1, prop_herd_DCT),
+         match_year = year(year)) %>%
+  distinct() %>%
+  ungroup() %>%
+  select(prop_herd_DCT, premises_year, year, premises_id, match_year)
+
+first_match <- prop_herd_DCT_current_year %>% # all matches lagged by a year
+  select(premises_id, year, match_year) %>%
+  distinct() %>%
+  mutate(year_num = year(year),
+         match_year = year_num - 1) %>%
+  select(-year) %>%
+  left_join(prop_herd_DCT_current_year, by = c('match_year', 'premises_id')) 
+  
+matched_1 <- first_match %>%
+  filter(!is.na(prop_herd_DCT))
+
+matched_2 <- first_match %>% # just those which haven't got a previous year, use current year as a proxy
+  filter(is.na(prop_herd_DCT)) %>%
+  mutate(match_year = match_year + 1) %>%
+  select(-prop_herd_DCT, -premises_year, -year) %>%
+  ungroup() %>%
+  left_join(prop_herd_DCT_current_year, by = c('match_year', 'premises_id'))
+
+all_matched <- rbind((rbind(matched_1, matched_2) %>% # add on those with no DCT
+  select(premises_year, prop_herd_DCT)),
+  years_with_no_DCT)
+
+DCT_prop <- all_matched
+
+DCT_prop <- premises_year_spine %>%
+  left_join(DCT_prop, by = 'premises_year') %>%
+  distinct()
+
+DCT_prop
+```
+
+### 4) Calving pattern
+- Self reported, from 2018/19 herd health plans
+```{r}
+reported_calving_pattern_with_addition <- readRDS(paste0(path, "reported_calving_pattern_with_addition.Rds"))
+reported_calving_pattern_with_addition %>%
+  filter(premises_id == '979')
+
+calving_pattern <- herd_years_in_df %>%
+  left_join(reported_calving_pattern_with_addition, by = 'premises_id') %>%
+  select(premises_year, calving_pattern) %>%
+  distinct() 
+
+calving_pattern
+```
+
+### 5) Organic versus conventional
+- Conv = 0, organic =  1
+```{r}
+farm_info <- read.csv(paste0(path, "synergy_ds/farm_info.csv")) %>%
+  select(PatientReference, farmType)
+
+organic_info <- farm_info %>%
+  mutate(premises_id = as.character(PatientReference), 
+         organic = ifelse(farmType == 'Organic', 1, 0)) %>%
+  select(premises_id, organic)
+
+organic_info <- herd_years_in_df %>%
+  left_join(organic_info, by = 'premises_id') %>%
+  select(premises_year, organic) %>%
+  distinct() 
+
+organic_info
+```
+
+### 6) Herd size
+```{r}
+synergy_abs_mgkg_tidy <- readRDS(paste0(path, 'synergy_abs_mgkg_tidy.Rds'))
+
+herd_size_info <- synergy_abs_mgkg_tidy %>%
+  select(premises_year, rolling_12_month_av) %>% # rolling_12_month_av is monthly rolling average, mean across year get year herd size
+  group_by(premises_year) %>%
+  summarise(herd_size = mean(rolling_12_month_av))
+
+herd_size_info <- premises_year_spine %>%
+  left_join(herd_size_info, by = 'premises_year') %>%
+  distinct()
+
+```
+### 7) Yield 
+```{r}
+yeild_info <- readRDS(paste0(path, 'yeild_info_per_year_cow.Rds')) %>%
+  mutate(premises_year = paste0(premises_id, '_', as.character(year_num), '-01-01')) %>%
+  ungroup() %>%
+  select(premises_year, total_prod_per_cow)
+
+yeild_info <- premises_year_spine %>%
+  left_join(yeild_info, by = 'premises_year') %>%
+  distinct()
+
+median(yeild_info$total_prod_per_cow)
+```
+
+### 8) Mean parity
+```{r}
+all_interherd_info <- readRDS(paste0(path, 'all_interherd_info.Rds'))
+parities_path <- paste0(path, 'from_interherd_db/new_pull/')
+
+parities_EAST <- read.csv(paste0(parities_path, 'parities_EAST.csv'), stringsAsFactors = F)%>%
+  rename(parity = 'Number') %>%
+  mutate(animal_id = paste0(Animal, '_', 'synergy_east')) %>%
+  left_join(all_interherd_info, by = 'animal_id')
+parities_SOUTH <- read.csv(paste0(parities_path, 'parities_SOUTH.csv'), stringsAsFactors = F)%>%
+  rename(parity = 'Number') %>%
+  mutate(animal_id = paste0(Animal, '_', 'synergy_south'))%>%
+  left_join(all_interherd_info, by = 'animal_id')
+parities_NORTH <- read.csv(paste0(parities_path, 'parities_NORTH.csv'), stringsAsFactors = F)%>%
+  rename(parity = 'Number') %>%
+  mutate(animal_id = paste0(Animal, '_', 'synergy_north'))%>%
+  left_join(all_interherd_info, by = 'animal_id')
+
+parity_by_year <- rbind(parities_EAST, parities_SOUTH, parities_NORTH) %>%
+  mutate(year = year(Date)) %>%
+  select(premises_id, parity, year) %>%
+  mutate(premises_year = paste0(premises_id, '_', as.character(year), '-01-01')) %>%
+  select(premises_year, parity)
+
+parity_info <- premises_year_spine %>%
+  left_join(parity_by_year, by = 'premises_year') %>%
+  group_by(premises_year) %>%
+  summarise(mu_parity = mean(parity))
+
+parity_info %>%
+  ggplot() +
+  geom_histogram(aes(x = mu_parity))
+```
+
+### 9) SCC
+```{r}
+all_interherd_info <- readRDS(paste0(path, 'all_interherd_info.Rds'))
+all_interherd_info
+interherd_db_path <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/synergy/data/from_interherd_db/new_pull/'
+
+milk_rec_east <- read.csv(paste0(interherd_db_path, "milk_recording_EAST.csv"), header = T, na.strings = c("NULL", "NA", "N/A", " "))%>%
+  mutate(region = "synergy_east")%>%
+  mutate(animal_id = paste0(as.character(Animal), '_', region)) %>%
+  select(Date, animal_id, SCC)
+
+milk_rec_north <- read.csv(paste0(interherd_db_path, "milk_recording_NORTH.csv"), header = T, na.strings = c("NULL","NA", "N/A", " "))%>%
+  mutate(region = "synergy_north")%>%
+  mutate(animal_id = paste0(as.character(Animal), '_', region)) %>%
+  select(Date, animal_id, SCC)
+
+milk_rec_south <- read.csv(paste0(interherd_db_path, "milk_recording_SOUTH.csv"), header = T, na.strings = c("NULL","NA", "N/A", " "))%>%
+  mutate(region = "synergy_south")%>%
+  mutate(animal_id = paste0(as.character(Animal), '_', region)) %>%
+  select(Date, animal_id, SCC)
+
+
+all_milk <- rbind(milk_rec_east, milk_rec_north, milk_rec_south)
+
+our_data_animal_ids <- all_interherd_info %>%
+  select(premises_id, animal_id)
+
+SCC_with_year <- our_data_animal_ids %>%
+  left_join(all_milk, by = 'animal_id') %>%
+  filter(!is.na(SCC)) %>%
+  mutate(year_num = year(as.Date(Date)),
+         premises_year = paste0(premises_id, '_', as.character(year_num), '-01-01'))
+
+SCC_info <- premises_year_spine %>%
+  left_join(SCC_with_year, by = 'premises_year') %>%
+  group_by(premises_year) %>%
+  summarise(mu_SCC = mean(SCC))
+
+SCC_info <- SCC_info %>%
+  mutate(mu_SCC_ml = mu_SCC*1000) %>%
+  select(premises_year, mu_SCC_ml)
+
+SCC_info
+```
+
+### 10) Weather vars
+```{r}
+weather_vars <- read.csv(paste0(path, "weather_vars.csv"), header = T, na.strings = c("NULL","NA", "N/A", " ")) %>%
+  filter(!is.na(year)) %>%
+  mutate(year_num = as.numeric(year))
+
+weather_df <- herd_years_in_df %>%
+  mutate(year_num = year(year)) %>%
+  left_join(weather_vars, by = 'year_num') %>%
+  select(premises_year, max_summer_temp, min_winter_temp, ann_mean_rain)
+```
+
+
+
+## Joining all predictor vars
+```{r}
+all_predictors <- herd_years_in_df %>%
+  select(premises_year, premises_id, year, region) %>%
+  left_join(weather_df, by = 'premises_year') %>%
+  left_join(SCC_info, by = 'premises_year') %>%
+  left_join(parity_info, by = 'premises_year') %>%
+  left_join(yeild_info, by = 'premises_year') %>%
+  left_join(herd_size_info, by = 'premises_year') %>%
+  left_join(organic_info, by = 'premises_year') %>%
+  left_join(calving_pattern, by = 'premises_year') %>%
+  left_join(DCT_prop, by = 'premises_year') %>%
+  left_join(vet_used, by = 'premises_year') %>%
+  left_join(n_visits_df, by = 'premises_year') 
+
+all_predictors
+
+# continuous predictors
+all_continuous_predictors <- all_predictors %>%
+  select(max_summer_temp, min_winter_temp, ann_mean_rain, mu_SCC_ml, mu_parity, total_prod_per_cow, herd_size, prop_herd_DCT, n_visits) 
+
+mu_predictors <- all_continuous_predictors %>%
+  summarise_all(~mean(., na.rm = T)) %>%
+  gather(key = 'predictor', value = 'mean' )
+
+sd_predictors <- all_continuous_predictors %>%
+  summarise_all(~sd(., na.rm = T)) %>%
+  gather(key = 'predictor', value = 'sd')
+
+scaling_stats_for_predictors <- mu_predictors %>%
+  left_join(sd_predictors, by = 'predictor')
+
+saveRDS(scaling_stats_for_predictors, paste0(path, 'scaling_stats_for_predictors.Rds'))
+
+# transform proportion 
+all_predictors_T <- all_predictors %>%
+  mutate(prop_herd_DCT = ifelse(prop_herd_DCT == 0, 0.001,
+                                ifelse(prop_herd_DCT == 1, 0.999,
+                                       prop_herd_DCT)),
+         prop_herd_DCT_T = brms::logit_scaled(prop_herd_DCT))
+
+# scale continuous
+all_predictors_T_S <- all_predictors_T %>%
+  mutate(max_summer_temp_S =  scale(max_summer_temp),
+         min_winter_temp_S =  scale(min_winter_temp),
+         ann_mean_rain_S =  scale(ann_mean_rain),
+         mu_SCC_ml_S =  scale(mu_SCC_ml),
+         mu_parity_S =  scale(mu_parity),
+         total_prod_per_cow_S =  scale(total_prod_per_cow),
+         herd_size_S = scale(herd_size),
+         n_visits_S = scale(n_visits),
+         prop_herd_DCT_T_S = scale(prop_herd_DCT_T))
+
+all_predictors_T_S_F <- all_predictors_T_S %>%
+  mutate(premises_year = as.factor(premises_year),
+         premises_id = as.factor(premises_id),
+         year = as.factor(year(year)),
+         region = as.factor(region),
+         calving_pattern_F = as.factor(calving_pattern),
+         most_common_vet_F = as.factor(most_common_vet),
+         organic_F = organic)
+
+levels(all_predictors_T_S_F$calving_pattern_F)
+
+saveRDS(all_predictors_T_S_F, paste0(path, 'all_predictors_T_S_F.Rds'))
+```
+
+## Making complete dataset
+### Investigating missing
+```{r, fig.width = 6, fig.height = 4}
+predictors <- readRDS(paste0(path, 'all_predictors_T_S_F.Rds')) 
+outcomes <- readRDS(paste0(path, 'mg_kg_outcomes_all_tidy_T_S.Rds'))
+
+final_predictors <-  predictors %>%
+  select(premises_year, premises_id, year, region, ends_with('_S'), ends_with('_F'))
+
+final_predictors <- final_predictors %>% # remove one which doesn't have a region
+  filter(!is.na(region)) 
+
+library(naniar)
+
+gg_miss_upset(final_predictors)
+
+final_predictors %>% summarise_all(.funs = ~round(100*sum(is.na(.))/length(.),2)) %>%
+  gather(key = 'predictor', value = 'percent_missing')
+
+```
+
+### Dealing with missing
+```{r}
+final_predictors_no_missing <- final_predictors %>%
+  mutate(total_prod_per_cow_S = ifelse(is.na(total_prod_per_cow_S),
+                                       mean(final_predictors$total_prod_per_cow_S, na.rm = T),
+                                       total_prod_per_cow_S),
+         mu_SCC_ml_S = ifelse(is.na(mu_SCC_ml_S),
+                                       mean(final_predictors$mu_SCC_ml_S, na.rm = T),
+                                       mu_SCC_ml_S),
+         organic_F = ifelse(is.na(organic_F),
+                                       0, # most common is non-organic
+                                       organic_F),
+         mu_parity_S = ifelse(is.na(mu_parity_S),
+                                       mean(final_predictors$mu_parity_S, na.rm = T),
+                                       mu_parity_S),
+         prop_herd_DCT_T_S = ifelse(is.na(prop_herd_DCT_T_S),
+                                       mean(final_predictors$prop_herd_DCT_T_S, na.rm = T),
+                                       prop_herd_DCT_T_S)) 
+
+final_predictors_no_missing %>% 
+  filter(if_any(everything(), is.na))
+```
+### Outcomes
+```{r}
+outcomes %>% summarise_all(.funs = ~sum(is.na(.))) %>%
+  gather(key = 'outcome', value = 'percent_missing')
+```
+- One herd has missing yeild info so will be excluded from total_mg_kg per L analysis
+
+```{r}
+outcomes_scaled_only <- outcomes %>%
+  select(premises_year, ends_with('T_S'),
+         -total_mgkg_T_S, -total_mgkg_per_L_T_S)
+
+names(outcomes_scaled_only) <- c('premises_year',
+                              'total_mgkg_esvac_O',
+                              'topical_mgkg_O',
+                              'im_mgkg_T_O',
+                              'systemic_mgkg_O',
+                              'total_mgkg_per_L_esvac_O')
+
+outcomes_scaled_only
+```
+### Joining scaled
+```{r}
+#scaled
+synergy_RF <- outcomes_scaled_only %>%
+  left_join(final_predictors_no_missing, by = 'premises_year') %>%
+  select(premises_year, premises_id, year, region, everything()) %>% 
+  filter(!is.na(region))
+
+saveRDS(synergy_RF, paste0(path, 'synergy_RF.Rds'))
+
+# unscaled
+mg_kg_outcomes_all_tidy_no_outlier <- readRDS(paste0(path, 'mg_kg_outcomes_all_tidy_no_outlier.Rds'))
+
+saveRDS(all_predictors_T_S_F, paste0(path, 'all_predictors_T_S_F.Rds'))
+
+synergy_RF_unscaled <- mg_kg_outcomes_all_tidy_no_outlier %>%
+  left_join(all_predictors, by = c('premises_year', 'premises_id', 'year', 'region')) %>%
+  select(premises_year, premises_id, year, region, everything()) %>% 
+  filter(!is.na(region)) %>%
+  mutate(year = as.character(as.numeric(year(year))),
+         premises_id = as.character(premises_id))
+
+saveRDS(synergy_RF_unscaled, paste0(path, 'synergy_RF_unscaled.Rds'))
+```
+
+
+

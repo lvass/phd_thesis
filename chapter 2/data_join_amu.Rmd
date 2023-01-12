@@ -1,0 +1,871 @@
+---
+title: "Joining data sources to calculate AMU"
+output: html_notebook
+---
+
+Aim:
+
+- Join antibioitc medicines matched using Monge-Elkan score and manually checked
+- Get into format so that all of synergy AMU can be easily calculated
+- Export as an Rda which has all AMU products per premises ID and interherd db ID
+- Check matches are all okay and units also match
+- Calculate AMU mg/kg for each product
+
+Cleaning:
+- Check herd size, AMU etc is reasonable
+- Add unique identifiers for item sales 
+
+### Load libraries and path
+```{r}
+library(tidyverse)
+library(lubridate)
+
+path <- 'C:/Users/lv13916/OneDrive - University of Bristol/Documents/PhD/projects/synergy/data/'
+setwd(path)
+```
+
+### Loading in raw data
+- Note - the sales data have already had sfh_abs_id matched in Excel via VLOOKUP due to strange string matching problem when trying to do the same in R
+```{r}
+setwd(path)
+
+complete_abs_matches <- read.csv("amu/complete_abs_matches_v2.csv", stringsAsFactors = F, na.strings=c("","NA", " ", "#NA", "#N/A"))
+sales_post2017 <- read.csv("amu/sales_post2017_sfh_id.csv", stringsAsFactors = F, na.strings=c("","NA", " ", "#NA", "#N/A"))
+sales_pre2017 <- read.csv("amu/sales_pre2017_sfh_id.csv", stringsAsFactors = F, na.strings=c("","NA", " ", "#NA", "#N/A"))
+abs_medicines_database <- read.csv("amu/abs_medicines_database_edit.csv", stringsAsFactors = F, na.strings=c("","NA", " ", "#NA", "#N/A"))
+
+setwd(path)
+oh_star_med_db <- read.csv("amu/oh_star_medicines_db.csv", stringsAsFactors = F, na.strings=c("","NA", " ", "#NA", "#N/A"))
+
+dim(complete_abs_matches)
+dim(sales_post2017)
+dim(sales_pre2017)
+dim(abs_medicines_database)
+
+
+```
+
+
+
+rows and cols check: 
+433   4
+183505     14
+820507     15
+301  17
+
+### Getting sales data and combining 
+- Filter out non-abs
+```{r}
+setwd(path)
+
+sales_pre2017_tidy <- sales_pre2017[c(1:10, 12, 13, 15)] # select cols
+sales_post2017_tidy <- sales_post2017[c(2:14)]
+head(sales_pre2017_tidy)
+head(sales_post2017_tidy)
+names(sales_pre2017_tidy) <- names(sales_post2017_tidy)
+
+pre_n <- dim(sales_pre2017_tidy)[1]
+post_n <- dim(sales_post2017_tidy)[1]
+
+all_sales <- rbind(sales_pre2017_tidy, sales_post2017_tidy) %>%
+  mutate(source = c(rep("old_db", pre_n), rep("new_db", post_n)))
+
+dim(all_sales) # 1004012, 13
+head(all_sales)
+names(all_sales) <- tolower(names(all_sales))
+
+all_sales <- all_sales %>%
+  filter(!is.na(patientreference))
+
+dim(all_sales) # 1003827, 13
+all_sales
+
+n_patients <- dim(all_sales %>%
+  count(patientreference))[1]
+n_patients # patients = herd, 6238
+
+
+# adding a sale id - one id for every item sold
+all_sales_id <- all_sales %>%
+  mutate(sale_num = seq(1, dim(all_sales)[1]),
+         sale_txt = rep("sale_", dim(all_sales)[1]),
+         sale_id = paste0(sale_txt, sale_num)) %>%
+  select(-sale_txt, -sale_num) %>%
+  select(sale_id, everything())
+
+# adding a vet visit ID
+visit_stats <- all_sales_id %>%
+  group_by(workdonedate, patientreference) %>%
+  summarise(n = n())
+
+mean(visit_stats$n)
+median(visit_stats$n)
+quantile(visit_stats$n, 0.25)
+quantile(visit_stats$n, 0.75)
+
+n_visits <- dim(visit_stats)[1]
+
+visit_stats <- visit_stats %>%
+  ungroup() %>%
+  mutate(visit_num = seq(1, n_visits),
+         visit_txt = rep("visit_", n_visits),
+         visit_id = paste0(visit_txt, visit_num)) %>%
+  select(workdonedate, patientreference, visit_id)
+
+all_sales_id <- all_sales_id %>%
+  left_join(visit_stats, by = c("workdonedate", "patientreference")) %>%
+  select(sale_id, visit_id, everything())
+
+write.csv(all_sales_id, "all_sales.csv")
+
+abs_sales <- all_sales_id %>%
+  filter(!is.na(sfh_abs_id))
+
+dim(abs_sales)[1]
+
+dim(abs_sales %>%
+  count(patientreference))[1]
+
+dim(abs_sales %>%
+  count(visit_id))[1]
+
+write.csv(abs_sales, "abs_sales.csv")
+```
+- In excluding non-abs sales, we have reduced patients to 2528 and visits to 107560
+- To assess number of visits and visit frequency, we will need the data on non-abs visits back
+
+### Matching sales to abs 
+- Using complete_abs_matches_v2.csv which is the result of the Monge-Elkan algorithim and manual checking.
+- Each database medicine has a unqiue abs_id. Each synergy abs has a unique sfh_abs_id
+
+```{r}
+setwd(path)
+
+matches <- complete_abs_matches %>%
+  select(sfh_abs_id, abs_id, db_match)
+
+names(abs_medicines_database) <- tolower(names(abs_medicines_database))
+
+abs_medicines_database <- abs_medicines_database %>%
+  rename("abs_id" = "med_id")
+
+
+abs_sales_matched <- abs_sales %>%
+  left_join(matches, by = "sfh_abs_id") %>%
+  left_join(abs_medicines_database, by = "abs_id")
+# 326233
+abs_medicines_database
+
+abs_sales_matched %>%
+  filter(is.na(sfh_abs_id))
+
+dim(abs_sales_matched)[1] # number of AM active drugs sold
+
+
+write.csv(abs_sales_matched, "abs_sales_matched.csv")
+```
+
+### Adding additonal info from OH-STAR db
+- main indication 
+- dose
+```{r}
+oh_star_med_db
+```
+
+```{r}
+oh_star_med_db_select <- oh_star_med_db %>%
+  select(Medicine, ActiveSubstances, Average.daily.dose.rate..mg.kg..mg.dose., Unit.of.dose, Use, Main.indication)
+
+names(oh_star_med_db_select) <- c("db_match", "active_sub", "daily_dose_mgkg", "dose_unit", "delivery_method", "indications")
+
+oh_star_med_db_select %>%
+  separate(indications, into = c("a", "b", "c", "d", "e"), ",")
+
+summary <- oh_star_med_db_select %>%
+  count(indications) %>%
+  arrange(-n) %>%
+  select(-n)
+
+summary_indications <- summary %>%
+  separate(indications, into = c("a", "b", "c", "d", "e"), ",") %>%
+  gather(key= "indication") %>%
+  select(value) %>%
+  filter(!is.na(value)) %>%
+  mutate(value = tolower(value)) %>%
+  distinct()
+
+summary_indications
+
+setwd(path)
+write.csv(summary_indications, "summary_indications_old.csv") # manually categorised
+
+setwd(path)
+summary_indications <- read.csv("summary_indications.csv") %>%
+  mutate(across(where(is.character), str_trim))
+
+oh_star_med_db_select <- oh_star_med_db_select %>%
+  mutate(indications = tolower(indications)) %>%
+  separate(indications, into = c("a", "b", "c", "d", "e"), ",") %>%
+  mutate(across(where(is.character), str_trim))
+
+summary_indicationsA <- summary_indications %>%
+  mutate(a = old_description)
+
+oh_star_med_db_selectEDIT <- oh_star_med_db_select %>%
+  left_join(summary_indicationsA, by = "a") %>%
+  rename("indication_category_A" = "indication_category") %>%
+  select(-old_description, -a)
+
+
+summary_indicationsB <- summary_indications %>%
+  mutate(b = old_description)
+
+oh_star_med_db_selectEDIT <- oh_star_med_db_selectEDIT %>%
+  left_join(summary_indicationsB, by = "b") %>%
+  rename("indication_category_B" = "indication_category") %>%
+  select(-old_description, -b)
+
+summary_indicationsC <- summary_indications %>%
+  mutate(c = old_description)
+
+oh_star_med_db_selectEDIT <- oh_star_med_db_selectEDIT %>%
+  left_join(summary_indicationsC, by = "c") %>%
+  rename("indication_category_C" = "indication_category") %>%
+  select(-old_description, -c)
+
+
+summary_indicationsD <- summary_indications %>%
+  mutate(d = old_description)
+
+oh_star_med_db_selectEDIT <- oh_star_med_db_selectEDIT %>%
+  left_join(summary_indicationsD, by = "d") %>%
+  rename("indication_category_D" = "indication_category") %>%
+  select(-old_description, -d)
+
+summary_indicationsE <- summary_indications %>%
+  mutate(e = old_description)
+
+oh_star_med_db_selectEDIT <- oh_star_med_db_selectEDIT %>%
+  left_join(summary_indicationsE, by = "e") %>%
+  rename("indication_category_E" = "indication_category") %>%
+  select(-old_description, -e)
+
+oh_star_med_db_selectEDIT <- oh_star_med_db_selectEDIT %>%
+  distinct()
+
+oh_star_med_db_selectTIDY <- oh_star_med_db_selectEDIT %>%
+  # mastitis
+  mutate(ind_mastitis = ifelse((indication_category_A == "mastitis" | indication_category_B == "mastitis" | indication_category_C == "mastitis"|indication_category_D == "mastitis"|indication_category_E == "mastitis"), TRUE, FALSE),
+         ind_mastitis = ifelse(is.na(ind_mastitis), FALSE, ind_mastitis)) %>%
+  # resp
+  mutate(ind_respiratory = ifelse((indication_category_A == "respiratory" | indication_category_B == "respiratory" |   indication_category_C == "respiratory"|indication_category_D == "respiratory"|indication_category_E == "respiratory"), TRUE, FALSE),
+         ind_respiratory = ifelse(is.na(ind_respiratory), FALSE, ind_respiratory)) %>%
+  # enteric
+  mutate(ind_enteric = ifelse((indication_category_A == "enteric" | indication_category_B == "enteric" |   indication_category_C == "enteric"|indication_category_D == "enteric"|indication_category_E == "enteric"), TRUE, FALSE),
+         ind_enteric = ifelse(is.na(ind_enteric), FALSE, ind_enteric)) %>%
+  # metritis
+  mutate(ind_metritis = ifelse((indication_category_A == "metritis" | indication_category_B == "metritis" |   indication_category_C == "metritis"|indication_category_D == "metritis"|indication_category_E == "metritis"), TRUE, FALSE),
+         ind_metritis = ifelse(is.na(ind_metritis), FALSE, ind_metritis)) %>%
+  # soft tissue
+  mutate(ind_soft = ifelse((indication_category_A == "soft tissue" | indication_category_B == "soft tissue" |   indication_category_C == "soft tissue"|indication_category_D == "soft tissue"|indication_category_E == "soft tissue"), TRUE, FALSE),
+         ind_soft = ifelse(is.na(ind_soft), FALSE, ind_soft)) %>%
+  # foot
+  mutate(ind_foot = ifelse((indication_category_A == "foot" | indication_category_B == "foot" |   indication_category_C == "foot"|indication_category_D == "foot"|indication_category_E == "foot"), TRUE, FALSE),
+         ind_foot = ifelse(is.na(ind_foot), FALSE, ind_foot)) %>%
+  # systemic
+  mutate(ind_systemic = ifelse((indication_category_A == "systemic" | indication_category_B == "systemic" |   indication_category_C == "systemic"|indication_category_D == "systemic"|indication_category_E == "systemic"), TRUE, FALSE),
+         ind_systemic = ifelse(is.na(ind_systemic), FALSE, ind_systemic)) %>%
+  select(-starts_with("indication_category"))
+
+
+### doing same with delivery method
+oh_star_med_db_selectTIDY %>%
+  count(delivery_method)
+
+oh_star_med_db_selectTIDY <-oh_star_med_db_selectTIDY %>%
+  mutate(delivery_method = as.factor(delivery_method))
+
+levels(oh_star_med_db_selectTIDY$delivery_method) <- c("DC intramammary",
+                                                       "Eye",
+                                                       "Footbath",
+                                                       "Injection",
+                                                       "Intrauterine",
+                                                       "LC intramammary",
+                                                       "Oral",
+                                                       "Oral",
+                                                       "Oral",
+                                                       "Oral",
+                                                       "Spray"
+                                                       )
+
+oh_star_med_db_selectTIDY %>%
+  count(delivery_method)
+
+oh_star_med_db_selectTIDY
+
+setwd(path)
+saveRDS(oh_star_med_db_selectTIDY, "additional_meddb_info.Rds")
+```
+
+Categories:
+
+mastitis 
+respiratory
+enteric
+metritis
+soft tissue
+foot
+systemic
+other
+
+
+### Tidying and checking units
+
+```{r}
+setwd(path)
+
+abs_sales_matched_tidy <- abs_sales_matched
+
+abs_sales_matched_tidy <- abs_sales_matched_tidy[c(1:3,6:28)] 
+
+names(abs_sales_matched_tidy) <- tolower(names(abs_sales_matched_tidy))
+
+abs_sales_matched_tidy <- abs_sales_matched_tidy %>%
+  mutate(workdonedate = as.Date(workdonedate, "%d/%m/%Y"))
+  
+abs_sales_matched_tidy <- abs_sales_matched_tidy %>%
+  mutate(unit.of.concentration_copy = unit.of.concentration) %>%
+  separate(unit.of.concentration_copy, sep = "/", into = c(NA, "denom_unit")) %>%
+  mutate(actual.quantity.unit = trimws(tolower(actual.quantity.unit)),
+         unit_match = ifelse(denom_unit == actual.quantity.unit, 1, 0))
+
+abs_sales_matched_tidy %>%
+  filter(itemdescriptionclean == "ubro red 20 pack") %>%
+  count(actual.quantity, actual.quantity.unit
+)
+
+abs_sales_matched_tidy %>%
+  filter(sale_id == "sale_813535")
+
+mismatches <- abs_sales_matched_tidy %>%
+  filter(unit_match == 0) %>%
+  group_by(actual.quantity.unit, denom_unit, abs_id, sfh_abs_id, itemdescriptionclean) %>%
+  count(medicine) %>%
+  arrange(desc(n))
+
+mismatches
+
+write.csv(mismatches, "denom_mismatches.csv")
+
+```
+
+### Dealing with unit mismatches
+- Manually checked mismatched units and added a correction factor to change units - eg. 1 pack of 120 tubes -> tubes = 120
+- Where quantities such as pack sizes was ambiguous, the largest pack size was assume to prevent under estimation
+- Where suspension products were given in ml only, it was assumed that 1ml suspension = 1g, although this is likely a slight over estimate
+- Noticed some units seem to be incorrect - check very high or very small perscription quantities
+- Utocl pessaries - unknown concentration and pack size, but not many used
+
+```{r}
+setwd(path)
+
+mismatches_correction <- read.csv("amu/denom_mismatches_unit_correction.csv", stringsAsFactors = F, na.strings=c("","NA", " ", "#NA", "#N/A"))
+
+mismatches_correction <- mismatches_correction %>%
+  select(-X, -X.1, -n, -itemdescriptionclean, -medicine)
+
+abs_sales_matched_tidy %>%
+  count(unit_match)
+
+abs_sales_matched_tidy <- abs_sales_matched_tidy %>%
+  left_join(mismatches_correction, by = c("actual.quantity.unit", "denom_unit", "abs_id", "sfh_abs_id")) %>%
+  mutate(unit_correction = ifelse(is.na(unit_correction), 1, unit_correction))
+
+length(unique((abs_sales_matched_tidy$sale_id)))
+
+
+abs_sales_matched_tidy %>%
+  filter(sale_id == "sale_813535")
+
+dim(abs_sales_matched_tidy)
+
+abs_sales %>%
+  filter(sale_id == "sale_813535")
+
+abs_sales_matched %>%
+  filter(sale_id == "sale_813535")
+
+
+abs_sales %>%
+  filter(sale_id == "sale_827328")
+
+abs_sales_matched %>%
+  filter(sale_id == "sale_827328")
+
+setwd(path)
+saveRDS(abs_sales_matched_tidy, "amu/abs_sales_matched_tidy.Rda")  
+
+```
+
+
+
+- Sales all conserved 
+
+### Getting mg sold 
+- Assume negative quantities as NA - refunds? But not clear if the product is exchanged etc.
+```{r}
+setwd(path)
+
+abs_sales_matched_tidy <- readRDS("amu/abs_sales_matched_tidy.Rda")  
+
+abs_sales_matched_tidy %>%
+    filter(sale_id == "sale_813535")
+
+dim(abs_sales_matched_tidy)
+
+
+
+abs_sales_matched_tidy %>%
+  filter(medicine == "Tetra-Delta Intramammary Suspension") %>%
+  filter(source == "old_db")
+
+
+abs_sales_matched_tidy %>%
+  filter(medicine == "Tetra-Delta Intramammary Suspension") %>%
+  filter(source == "new_db")
+  
+
+abs_sales_matched_joined %>%
+  filter(source == "old-db")
+```
+	
+```{r}
+abs_sales_matched_calc <- abs_sales_matched_tidy %>%
+  mutate(actual.quantity = ifelse(actual.quantity < 0, NA, actual.quantity),
+        mg_abs = actual.quantity*unit_correction*concentration..mg.or.iu.)
+
+abs_sales_matched_calc %>%
+  filter(medicine == "Tetra-Delta Intramammary Suspension") %>%
+  filter(source == "old_db")
+
+
+abs_sales_matched_calc %>%
+  filter(medicine == "Tetra-Delta Intramammary Suspension") %>%
+  filter(source == "new_db")
+abs_sales_matched_calc
+
+abs_sales_matched_calc <- abs_sales_matched_calc[c(1:16,18:26,28,38:40,44)]
+
+abs_sales_calc_tidy <- abs_sales_matched_calc %>%
+  rename("med_name" = "medicine",
+         "active_sub" = "activesubstances",
+         "med_group" = "therapeuticgroup",
+         "num_ingred" = "number.of.am.active.ingredients",
+         "conc" = "concentration..mg.or.iu.",
+         "conc_unit" = "unit.of.concentration",
+         #"form" = "pharmaceuticalform",
+         "date" = "workdonedate",
+         "item_desc" = "itemdescriptionclean",
+         "premises_id" = "patientreference",
+         "client_id" = "clientrefnumber",
+         "vet_id" = "vetid",
+         "quantity" = "actual.quantity",
+         "quantity_unit" = "actual.quantity.unit",
+         "abs_class" = "class") %>%
+         #"species" = "targetspecies")
+  select(-db_match, -itemdescription, -itemcode, -use)
+
+head(abs_sales_calc_tidy)
+dim(abs_sales_calc_tidy)
+
+
+saveRDS(abs_sales_calc_tidy, "amu/abs_sales_calc_tidy.Rda")  
+
+```
+
+
+### Getting herd size infomation
+```{r}
+setwd(path)
+east_stays <- read.csv("from_interherd_db/herd_size_per_monthEAST.csv")
+north_stays <- read.csv("from_interherd_db/herd_size_per_monthNORTH.csv")
+south_stays <- read.csv("from_interherd_db/herd_size_per_monthSOUTH.csv")
+east_stays
+names(east_stays) <- c("Id", "month", "herd_size")
+names(north_stays) <- c("Id", "month", "herd_size")
+names(south_stays) <- c("Id", "month", "herd_size")
+
+north_stays <- north_stays %>%
+  mutate(Region = "Synergy_North")
+east_stays <- east_stays %>%
+  mutate(Region = "Synergy_East")
+south_stays <- south_stays %>%
+  mutate(Region = "Synergy_South")
+
+all_stays <- rbind(north_stays, south_stays, east_stays) %>%
+  mutate(month = as.character(month))
+
+premises_id <- read.csv("synergy_ds/interherdid_premisesid_lookup.csv")
+
+all_stays <- premises_id %>%
+  inner_join(all_stays, by = c("Region", "Id")) %>%
+  mutate(herd_av_kg = herd_size * 425) %>% # using PCU
+  rename("premises_id" = "Patient.Ref")
+
+# converting date time to date
+all_stays$month <- sapply(strsplit(all_stays$month, " "), `[`, 1, simplify=TRUE)
+
+all_stays <- all_stays %>%
+  mutate(month = as.Date(month, "%Y-%m-%d"))
+
+setwd(path)
+saveRDS(all_stays, "all_stays.Rds")
+
+```
+
+
+### Clear vars because there are large datasets
+```{r}
+rm(list=ls())
+
+path <- 'C:/Users/lv13916/OneDrive - University of Bristol/Documents/PhD/projects/synergy/data/'
+setwd(path)
+```
+
+
+### Joining herd weights and antibiotic mgs sold
+- Need to get all stays in period from 2009-11-01
+```{r}
+setwd(path)
+all_stays <- readRDS("all_stays.Rds")
+abs_sales_calc_tidy <- readRDS("amu/abs_sales_calc_tidy.Rda")  
+head(abs_sales_calc_tidy)
+
+all_stays %>%
+  ggplot() +
+  geom_line(aes(x = month, y = herd_size, group = premises_id))
+
+all_stays %>%
+  group_by(premises_id) %>%
+  summarise(mu = mean(herd_size)) %>%
+  ggplot() +
+  geom_histogram(aes(x = mu))
+```
+
+
+#### Filtering out those with not full info - eg no herd size,AM data for less than a year
+```{r}
+prem_with_herdsize <- (all_stays %>%
+  count(premises_id))$premises_id
+
+length(prem_with_herdsize)
+#133 premises with herd size info
+
+# keep only premises that have >a years worth of ABS data
+premises_keep <- (abs_sales_calc_tidy %>%
+  filter(premises_id %in% prem_with_herdsize) %>%
+  group_by(premises_id) %>%
+  summarise(time = as.numeric(max(date) - min(date))) %>%
+  filter(time > 365) %>%
+  arrange(desc(time)))$premises_id
+
+#130 premises have >1 year ABS data
+
+abs_sales_keep <- abs_sales_calc_tidy %>%
+  filter(premises_id %in% premises_keep) %>%
+  mutate(month = floor_date(date), unit = "month",
+         month = as.Date(month, "%Y-%m-%d")) %>%
+  select(-unit)
+
+abs_sales_keep <- abs_sales_keep %>%
+  filter(premises_id %in% prem_with_herdsize)
+#356,238 abs sales  
+
+abs_sales_keep %>%
+  count(premises_id)
+
+setwd(path)
+saveRDS(abs_sales_keep, "amu/abs_sales_keep.Rds")
+# 130 remain
+
+# plotting some to check length at practice
+ran <- round(runif(30, 1, max = length(unique(abs_sales_keep$premises_id))))
+
+first_30 <- unique(abs_sales_keep$premises_id)[ran]
+
+abs_sales_keep %>%
+  filter(premises_id %in% first_30) %>%
+  mutate(premises_id = as.factor(as.character(premises_id))) %>%
+  ggplot() + 
+  geom_point(aes(x = month, y = premises_id, colour = premises_id)) +
+  theme(legend.position = "none")
+
+length_at_practice <- abs_sales_keep %>%
+  group_by(premises_id) %>%
+  summarise(start_date = min(month),
+            end_date = max(month)) %>%
+  mutate(diff_days = as.numeric(end_date - start_date),
+         diff_year = diff_days/365)
+
+length_at_practice %>%
+  ggplot() +
+  geom_histogram(aes(x = diff_year))
+
+length_at_practice %>%
+  filter(diff_year >= 9)
+
+87/130
+
+max(length_at_practice$diff_year)
+```
+
+```{r}
+all_stays %>%
+  filter(premises_id %in% premises_keep) %>%
+  ggplot() +
+  geom_line(aes(x =month, y = herd_size, group = as.factor(premises_id))) +
+  scale_y_continuous(trans = "log10")
+
+```
+
+### Checking for extreme changes which could be errors
+```{r}
+all_stays_diff <- all_stays %>%
+  mutate(diff = as.numeric(0))
+
+for (i in unique(all_stays$premises_id)){
+  diffs <- all_stays %>%
+    filter(premises_id == i) %>%
+    arrange(month) %>%
+    mutate(herd_size_lag = lag(herd_size),
+           diff = herd_size - herd_size_lag) %>%
+    select(premises_id, month, diff)
+  
+  all_stays_diff <- all_stays_diff %>%
+    left_join(diffs, by = c("premises_id", "month")) %>%
+    mutate(diff.x = as.numeric(ifelse(is.na(diff.x), 0, diff.x)),
+           diff.y = as.numeric(ifelse(is.na(diff.y), 0, diff.y)),
+           diff = diff.y + diff.x) %>%
+    select(-diff.y, -diff.x)
+}
+
+big_change_premises <- all_stays_diff %>%
+  mutate(diff_prop = ifelse(diff/herd_size*100 < 0, diff/herd_size*100*-1, diff/herd_size*100)) %>%
+  arrange(desc(diff_prop)) %>%
+  filter(diff_prop > 90) %>%
+  select(premises_id)
+
+big_change_premises
+unique(big_change_premises)
+
+
+all_stays_diff %>%
+    filter(premises_id == "6194") %>%
+    ggplot() +
+    geom_line(aes(x = month, y = herd_size))
+
+all_stays_diff %>%
+    filter(premises_id == "979") %>%
+    ggplot() +
+    geom_line(aes(x = month, y = herd_size))
+
+all_stays_diff %>%
+    filter(premises_id == "5996") %>%
+    ggplot() +
+    geom_line(aes(x = month, y = herd_size))
+
+all_stays_diff %>%
+    filter(premises_id == "1017") %>%
+    ggplot() +
+    geom_line(aes(x = month, y = herd_size))
+
+all_stays_diff %>%
+    filter(premises_id == "2024") %>%
+    ggplot() +
+    geom_line(aes(x = month, y = herd_size))
+
+all_stays_diff %>%
+    filter(premises_id == "4535") %>%
+    ggplot() +
+    geom_line(aes(x = month, y = herd_size))
+
+all_stays_diff %>%
+    filter(premises_id == "563") %>%
+    ggplot() +
+    geom_line(aes(x = month, y = herd_size))
+
+```
+
+### Smoothing extreme changes using rolling average
+```{r}
+setwd(path)
+all_stays <- readRDS("all_stays.Rda") 
+
+all_stays_copy <- all_stays %>%
+  select(-herd_av_kg) %>%
+ # filter(premises_id == 236) %>%
+  arrange(premises_id, month) %>%
+  filter(!(premises_id == 2295)) # duplicate premises_id, can't match with sales correctly so remove
+
+all_stays_copy
+all_stays_ref <- all_stays %>%
+  select(premises_id, month, herd_size) %>%
+  rename("month_match" = "month")
+
+
+for (i in c(-6:6)){
+  print(i)
+  new_name <- paste0("herd_size_lag", as.character(i))
+  
+  editted_all_stays_copy <- all_stays_copy %>%
+    mutate(month_match = month %m+% months(i)) %>%
+    left_join(all_stays_ref, by = c("premises_id", "month_match")) %>%
+    rename("herd_size" = "herd_size.x")
+  
+  n <- dim(editted_all_stays_copy)[2]
+  
+  names(editted_all_stays_copy) <- c(names(editted_all_stays_copy)[1:n-1], new_name) 
+  all_stays_copy <- editted_all_stays_copy %>%
+    select(-month_match)
+}
+
+
+all_stays_copy <- all_stays_copy %>%
+  mutate(rolling_12_month_av = rowMeans(select(all_stays_copy, starts_with("herd_size_lag")), na.rm = TRUE)) %>%
+  select(premises_id, month, herd_size, rolling_12_month_av)
+
+all_stays_copy %>%
+  filter(premises_id == 563) %>%
+  ggplot() +
+  geom_point(aes(x = month, y = rolling_12_month_av), colour = dual_blues[1]) +
+  geom_line(aes(x = month, y = rolling_12_month_av), colour = dual_blues[1]) +
+  geom_point(aes(x = month, y = herd_size), colour = dual_blues[2]) +
+  geom_line(aes(x = month, y = herd_size), colour = dual_blues[2])
+
+all_stays_copy
+
+all_stays <- all_stays_copy %>%
+  select(premises_id, month, rolling_12_month_av) %>%
+  left_join(all_stays, by = c("premises_id", "month")) %>%
+  mutate(herd_av_kg = rolling_12_month_av*425)
+
+
+setwd(path)
+saveRDS(all_stays, "all_stays.Rds") 
+
+```
+
+# Joining antimicrobial info to get mg/kg
+```{r}
+setwd(path)
+
+all_stays <-readRDS("all_stays.Rds") 
+abs_sales_keep <- readRDS("amu/abs_sales_keep.Rds")
+abs_sales_keep
+
+synergy_abs_joined <- abs_sales_keep %>%
+  mutate(month = floor_date(date, unit = "month")) %>%
+  left_join(all_stays, by =c("month", "premises_id")) 
+
+synergy_abs_joined <- synergy_abs_joined %>%
+  filter(!is.na(herd_size))
+
+length(unique(synergy_abs_joined$premises_id)) # 129 premises
+
+synergy_abs_mgkg <- synergy_abs_joined %>%
+  mutate(mg_abs = quantity*conc*unit_correction,
+         abs_mg_kg = mg_abs/(rolling_12_month_av*425)) # herd size times 425kg = mg/kg
+
+prop_missing = dim(synergy_abs_mgkg %>%
+  filter(is.na(abs_mg_kg)))[1]/dim(synergy_abs_mgkg)[1]*100
+
+print(paste("Proportion missing mg of abs:", as.character(round(prop_missing,3)), "%" ))  
+
+synergy_abs_mgkg %>%
+  count(premises_id)
+
+synergy_abs_mgkg <- synergy_abs_mgkg %>%
+  mutate(premises_id = as.factor(as.character(premises_id)))
+
+setwd(path)
+saveRDS(synergy_abs_mgkg, "amu/synergy_abs_mgkg.Rds")
+```
+
+```{r}
+unique(synergy_abs_mgkg$premises_id)[1:15]
+
+synergy_abs_mgkg %>%
+  count(premises_id)
+
+# 129 premises
+
+synergy_abs_mgkg <- synergy_abs_mgkg %>%
+  select(Region, Id, premises_id, sale_id, visit_id, month, date, vet_id, abs_id, med_name, species, form, active_sub, med_group, abs_class, num_ingred, conc, conc_unit, quantity, quantity_unit, denom_unit, unit_correction, rolling_12_month_av,  herd_av_kg,
+         mg_abs, abs_mg_kg) %>%
+  rename("region" = "Region",
+         "interherd_ID" = "Id")
+  
+
+
+hpcia_list <- c("3rd generation Cephalosporin",
+                "4th generation Cephalosporin",
+                "Fluoroquinolone")
+
+synergy_abs_mgkg <- synergy_abs_mgkg %>%
+  mutate(abs_class = as.factor(str_trim(abs_class)),
+         med_name = as.factor(med_name),
+         hpcia = ifelse(abs_class %in% c(hpcia_list), 1, 0))
+# 353262 rows, 26 cols
+
+
+
+synergy_abs_mgkg <- synergy_abs_mgkg %>%
+  distinct() 
+# 353262 rows, 26 cols
+
+dim(synergy_abs_mgkg)
+
+setwd(path)
+
+saveRDS(synergy_abs_mgkg, "amu/synergy_abs_mgkg.Rds")
+```
+
+```{r}
+synergy_abs_mgkg %>%
+   # filter(premises_id == "1023") %>%
+  group_by(month) %>%
+  summarise(total_amu = sum(abs_mg_kg)) %>%
+  ggplot() +
+  geom_line(aes(x = month, y = total_amu))
+  
+synergy_abs_mgkg %>%
+  count(premises_id)
+synergy_abs_mgkg %>%
+  filter(premises_id == "1023") %>%
+  count(month, visit_id) %>%
+  mutate(n = 1) %>%
+  group_by(month) %>%
+  summarise(visits = sum(n)) %>%
+  ggplot() +
+  geom_line(aes(x = month, y = visits))
+
+
+synergy_abs_mgkg %>%
+  filter(premises_id == "1023") %>%
+ # filter(med_name == "Tetra-Delta Intramammary Suspension") %>%
+  group_by(month) %>%
+  summarise(total_amu = sum(abs_mg_kg)) %>%
+  ggplot() +
+  geom_line(aes(x = month, y = total_amu))
+
+synergy_abs_mgkg %>%
+  filter(premises_id == "1023") %>%
+  filter(med_name == "Tetra-Delta Intramammary Suspension") %>%
+  filter(date < "2017-11-01")
+
+synergy_abs_mgkg %>%
+  filter(premises_id == "1023") %>%
+  filter(med_name == "Tetra-Delta Intramammary Suspension") %>%
+  filter(date > "2017-11-01")
+```
+

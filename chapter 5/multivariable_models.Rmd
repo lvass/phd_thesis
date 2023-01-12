@@ -1,0 +1,339 @@
+---
+title: "Model building - temperature effect part B"
+output: html_notebook
+---
+
+Multivariable model for each location/age
+Temp + humid + temp:humid + spline
+
+Plot - point intervals
+Results in table
+
+
+# Set-up
+```{r}
+library(tidyverse)
+library(brms)
+options(mc.cores = 8, brms.backend = "cmdstanr") # allows threading
+library(tryCatchLog)
+library(loo)
+library(lubridate)
+library(tidybayes)
+```
+
+# Paths
+```{r}
+datapath <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/rds_rda/modelling_uncertainty/data_with_locations/'
+savepath <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/rds_rda/final_models_new/'
+```
+
+# Functions
+### Creating formula
+```{r}
+make_formula_poisson_var <- function(rf_formula){
+  
+  model_formula <- bf(count ~ main + am * log_inv_logit(interaction),nl=TRUE)
+  model_formula <- model_formula + lf(main ~ offset(log_dilution) + (1|assay)) 
+  model_formula <- model_formula + lf(paste("interaction ~ ", as.character(rf_formula)))
+  
+  return(model_formula)
+}
+
+```
+
+
+### Computing model
+```{r}
+run_possion_model <- function(data, model_formula, savepath, savename, chain_length){
+    if (is.na(chain_length)){
+      chain_length <- 4000
+    }
+  
+    custom_priors_highvar <- c(
+      set_prior('normal(0, 5)', class = 'b', nlpar = 'interaction'), 
+      set_prior('normal(0, 5)', class = 'b', nlpar = 'main'),
+      set_prior('normal(10, 1)', class = 'sd', nlpar = 'interaction', group = 'assay'), # prevents this wide prior on 'true' random effects which we want with low var
+      set_prior('normal(10, 1)', class = 'sd', nlpar = 'main')# fix variance high using normal dist
+    )
+    
+  start_time <- Sys.time()
+  
+  options(mc.cores = 8, brms.backend = "cmdstanr") # allows threading
+
+  model <- brm(
+    formula = model_formula,
+    data = as.data.frame(data), 
+    family = poisson(), 
+    prior = custom_priors_highvar,
+    iter = chain_length, warmup = chain_length/2, chains = 4, cores = 4,
+    silent = F,
+    backend = "cmdstanr",
+    threads = threading(2) #8 cores used 
+    )
+  
+  end_time <- Sys.time()
+  print(end_time - start_time)
+  
+  saveRDS(model, paste0(savepath, savename))
+  
+  return(model)
+}
+
+```
+
+
+# Reading in data
+```{r}
+df1_yard_amox <- readRDS(paste0(datapath, 'df1_yard_', 'amox', '_brms.Rds'))
+df1_shed_amox <- readRDS(paste0(datapath, 'df1_shed_', 'amox', '_brms.Rds'))
+df1_yard_ceph <- readRDS(paste0(datapath, 'df1_yard_', 'ceph', '_brms.Rds'))
+df1_shed_ceph <- readRDS(paste0(datapath, 'df1_shed_', 'ceph', '_brms.Rds'))
+df1_yard_cipro <- readRDS(paste0(datapath, 'df1_yard_', 'cipro', '_brms.Rds'))
+df1_shed_cipro <- readRDS(paste0(datapath, 'df1_shed_', 'cipro', '_brms.Rds'))
+df1_yard_strep <- readRDS(paste0(datapath, 'df1_yard_', 'strep', '_brms.Rds'))
+df1_shed_strep <- readRDS(paste0(datapath, 'df1_shed_', 'strep', '_brms.Rds'))
+df1_yard_tetra <- readRDS(paste0(datapath, 'df1_yard_', 'tetra', '_brms.Rds'))
+df1_shed_tetra <- readRDS(paste0(datapath, 'df1_shed_', 'tetra', '_brms.Rds'))
+
+```
+
+
+
+# Running multivariable model
+```{r}
+run_multivar_model <- function(df, save_name){
+  model <- tryLog(run_possion_model(data = df,
+                  model_formula = make_formula_poisson_var('1 + mean_week_temperature_S + mean_week_humidity_S + mean_week_temperature_S:mean_week_humidity_S + s(study_day_effect, bs ="gp") + (1|location_id) + (1|farm) + (1|assay)'),
+                  savepath,
+                  savename = paste0('multivar_B1_', save_name, '.Rds'),
+                  chain_length = 4000))
+  return(summary(model))
+  rm(model)
+}
+
+
+run_multivar_model(df1_yard_amox, 'yard_amox')
+run_multivar_model(df1_shed_amox, 'shed_amox')
+
+run_multivar_model(df1_yard_ceph, 'yard_ceph')
+run_multivar_model(df1_shed_ceph, 'shed_ceph')
+
+run_multivar_model(df1_yard_strep, 'yard_strep')
+run_multivar_model(df1_shed_strep, 'shed_strep')
+
+run_multivar_model(df1_yard_tetra, 'yard_tetra')
+run_multivar_model(df1_shed_tetra, 'shed_tetra')
+
+```
+
+
+# Results table and plots
+```{r}
+calc_effect_size_multivar <- function(model, am, location){
+    res <- model  %>%
+      spread_draws(b_interaction_mean_week_temperature_S, b_interaction_mean_week_humidity_S, 
+                   `b_interaction_mean_week_temperature_S:mean_week_humidity_S`) %>%
+      mutate(model = as.factor(am),
+             location = as.factor(location)) %>%
+      select(-.chain, -.iteration, -.draw)
+  
+  return(res)
+}
+
+
+all_ams_mutli <- rbind(calc_effect_size_multivar(readRDS(paste0(savepath, 'multivar_B1_yard_amox.rds')), 'Amoxicillin', 'yard'),
+                          calc_effect_size_multivar(readRDS(paste0(savepath, 'multivar_B1_shed_amox.rds')), 'Amoxicillin', 'shed'),
+                          calc_effect_size_multivar(readRDS(paste0(savepath, 'multivar_B1_yard_ceph.Rds')), 'Cephalexin', 'yard'),
+                          calc_effect_size_multivar(readRDS(paste0(savepath, 'multivar_B1_shed_ceph.Rds')), 'Cephalexin', 'shed'),
+                          calc_effect_size_multivar(readRDS(paste0(savepath, 'multivar_B1_yard_strep.Rds')),
+                                                    'Streptomycin', 'yard'),
+                          calc_effect_size_multivar(readRDS(paste0(savepath,
+                                                                   'multivar_B1_shed_strep.Rds')),
+                                                    'Streptomycin', 'shed'),
+                          calc_effect_size_multivar(readRDS(paste0(savepath,
+                                                                   'multivar_B1_yard_tetra.Rds')),
+                                                    'Tetracycline', 'yard'),
+                          calc_effect_size_multivar(readRDS(paste0(savepath, 'multivar_B1_shed_tetra.Rds')),
+                                                    'Tetracycline', 'shed'))
+
+levels(all_ams_mutli$location) <- c('Adults in collecting yard', 'Heifers in sheds/pens')
+
+median_and_CIs <- function(data){
+  med <- as.character(round(median(data), 3))
+  upp <- as.character(round(quantile(data, 0.975), 3))
+  low <- as.character(round(quantile(data, 0.025), 3))
+  sig <- ' '
+  if((upp > 0 & low > 0) | (upp < 0 & low < 0) ){
+    sig <- '*'
+  }
+  
+  return(paste0(med, ' (', low, ', ', upp, ')  ', sig))
+}
+
+res_table_multi <- all_ams_mutli %>%
+  group_by(model, location) %>%
+  summarise(temp_coef = median_and_CIs(b_interaction_mean_week_temperature_S),
+            humidity_coef = median_and_CIs(b_interaction_mean_week_humidity_S),
+            interaction = median_and_CIs(`b_interaction_mean_week_temperature_S:mean_week_humidity_S`))
+
+res_table_multi
+
+write.csv(res_table_multi, paste0(savepath, 'multivar_results.csv'))
+
+names(all_ams_mutli) <- c('Temperature', 'Humidity', 'Temperature:Humidity', 'Model', 'Location')
+
+all_ams_mutli_long <- all_ams_mutli %>%
+  gather(key = 'predictor', value = 'estimate', -Model, -Location)
+
+plot_multivar_points <- function(df, am_name, colour_code){
+  df %>%
+    filter(Model == am_name) %>%
+    ggplot() +
+    stat_pointinterval(aes(y = predictor, x = estimate, group = Location, shape = Location), position = 'dodge', colour = colour_code) +
+    geom_vline(aes(xintercept = 0), linetype = 2, colour = 'grey') +
+    theme_minimal() +
+    xlab('Coefficient estimate') +
+    ylab('') +
+    ggtitle(am_name)
+}
+
+plot_multivar_points(all_ams_mutli_long, 'Amoxicillin', '#0CC6DE')
+plot_multivar_points(all_ams_mutli_long, 'Cephalexin', '#34B233')
+plot_multivar_points(all_ams_mutli_long, 'Streptomycin', '#002F5F')
+plot_multivar_points(all_ams_mutli_long, 'Tetracycline', '#9672b5')
+
+```
+values = c('Amoxicillin' = "#0CC6DE", 'Cephalexin' = "#34B233", 'Streptomycin' ="#002F5F", 'Tetracycline' ='#9672b5')) +
+
+### Spline visualisation
+```{r}
+plot_spline_day_of_study <- function(model, data, no_bacs, am_name, location_name, colour_code, min_date, max_date){
+    
+  n <- 100
+  seq_day_in_study <- seq(0,1,(1/(n-1)))
+  
+  dummy_data <- tibble(
+    x_val = rep(paste0('V', as.character(seq(1,n))), 2)) %>%
+    mutate(am = c(rep(0, n), rep(1, n)),
+           log_dilution = c(rep(log(0.1),n), rep(0, n)),
+           mean_week_temperature_S = 0,
+           mean_week_humidity_S = 0,
+           study_day_effect = rep(seq_day_in_study, 2),
+           farm = NA,
+           assay = NA,
+           location_id = NA)
+  
+  estimates <- as_tibble(inv_logit_scaled(fitted(model,
+                      newdata = dummy_data,
+                      re_formula = NA,
+                      nlpar = 'interaction')))
+  
+  assays <- as_tibble(inv_logit_scaled(fitted(model,
+                      re_formula = NULL,
+                      nlpar = 'interaction')))
+  
+  names(assays) <- paste0('assay_', names(assays))
+  
+  n_days <- as.numeric(max(data$date) - min(data$date))
+  
+  assays_ests <- cbind(assays, model$data) %>%
+    filter(am == 0) %>%
+    mutate(date = min(data$date) + study_day_effect*n_days)
+
+  res <- cbind(estimates, dummy_data) %>%
+    filter(am == 0) %>%
+    filter(study_day_effect > min(assays_ests$study_day_effect) & study_day_effect < max(assays_ests$study_day_effect)) %>%
+    mutate(date = min(data$date) + study_day_effect*n_days)
+  
+  diff <- (min(res$Estimate)) /median(assays_ests$assay_Estimate) # no intercept, so adjust spline to median
+
+  spline_plot <- res %>%
+    ggplot() +
+    geom_point(data = no_bacs, aes(y = 3e-7, x = date), alpha = 0.5, colour = 'red', shape = 18, size = 2.5) +
+    geom_point(data = assays_ests, aes(y = assay_Estimate, x = date), alpha = 0.3, colour = 'grey') +
+    geom_line(aes(x = date, y = Estimate), colour = colour_code, size = 1.5) +
+    geom_ribbon(aes(x =  date, ymin = Q2.5, ymax = Q97.5), alpha = 0.5, fill = colour_code) +
+    scale_y_continuous(trans = 'log10', limits = c(1e-7, 1)) +
+    xlab('Date') +
+    ylab('Estimated proportion resistant') +
+    theme_minimal() +
+    ggtitle(paste0(am_name, ': ', location_name))
+  
+  return(spline_plot)
+  
+}
+
+
+```
+values = c('Amoxicillin' = "#0CC6DE", 'Cephalexin' = "#024731",  'Ciprofloxacin' = "#34B233", 'Streptomycin' ="#002F5F", 'Tetracycline' ='#9672b5')) +
+
+```{r}
+no_bac_yard <- readRDS(paste0(datapath, 'df1_no_bac_yard.Rds'))
+no_bac_shed <- readRDS(paste0(datapath, 'df1_no_bac_shed.Rds'))
+
+df1_yard_amox <- readRDS(paste0(datapath, 'df1_yard_', 'amox', '_brms.Rds'))
+df1_shed_amox <- readRDS(paste0(datapath, 'df1_shed_', 'amox', '_brms.Rds'))
+df1_yard_ceph <- readRDS(paste0(datapath, 'df1_yard_', 'ceph', '_brms.Rds'))
+df1_shed_ceph <- readRDS(paste0(datapath, 'df1_shed_', 'ceph', '_brms.Rds'))
+df1_yard_strep <- readRDS(paste0(datapath, 'df1_yard_', 'strep', '_brms.Rds'))
+df1_shed_strep <- readRDS(paste0(datapath, 'df1_shed_', 'strep', '_brms.Rds'))
+df1_yard_tetra <- readRDS(paste0(datapath, 'df1_yard_', 'tetra', '_brms.Rds'))
+df1_shed_tetra <- readRDS(paste0(datapath, 'df1_shed_', 'tetra', '_brms.Rds'))
+
+all_data <- rbind(df1_yard_amox, df1_shed_amox)
+min_date <- min(all_data$date)
+max_date <- max(all_data$date)
+
+p_amox_yard <- plot_spline_day_of_study(readRDS(paste0(savepath, 'multivar_B1_yard_amox_test.rds')),
+                         df1_yard_amox, no_bac_yard, 'Amoxicillin', 'Adults in collecting yard', '#0CC6DE',
+                         min_date, max_date)
+
+p_amox_shed <- plot_spline_day_of_study(readRDS(paste0(savepath, 'multivar_B1_shed_amox.rds')),
+                         df1_yard_amox, no_bac_shed, 'Amoxicillin', 'Heifers in sheds/pens', '#0CC6DE',
+                         min_date, max_date)
+
+p_ceph_yard <- plot_spline_day_of_study(readRDS(paste0(savepath, 'multivar_B1_yard_ceph.rds')),
+                         df1_yard_amox, no_bac_yard, 'Cephalexin', 'Adults in collecting yard', '#34B233',
+                         min_date, max_date)
+
+p_ceph_shed <- plot_spline_day_of_study(readRDS(paste0(savepath, 'multivar_B1_shed_ceph.rds')),
+                         df1_yard_amox, no_bac_shed, 'Cephalexin', 'Heifers in sheds/pens', '#34B233',
+                         min_date, max_date)
+
+p_strep_yard <- plot_spline_day_of_study(readRDS(paste0(savepath, 'multivar_B1_yard_strep.rds')),
+                         df1_yard_amox, no_bac_yard, 'Streptomycin', 'Adults in collecting yard', '#002F5F',
+                         min_date, max_date)
+
+p_strep_shed <- plot_spline_day_of_study(readRDS(paste0(savepath, 'multivar_B1_shed_strep.rds')),
+                         df1_yard_amox, no_bac_shed, 'Streptomycin', 'Heifers in sheds/pens', '#002F5F',
+                         min_date, max_date)
+
+
+p_tetra_yard <- plot_spline_day_of_study(readRDS(paste0(savepath, 'multivar_B1_yard_tetra.rds')),
+                         df1_yard_amox, no_bac_yard, 'Tetracycline', 'Adults in collecting yard', '#9672b5',
+                         min_date, max_date)
+
+p_tetra_shed <- plot_spline_day_of_study(readRDS(paste0(savepath, 'multivar_B1_shed_tetra.rds')),
+                         df1_yard_amox, no_bac_shed, 'Tetracycline', 'Heifers in sheds/pens', '#9672b5',
+                         min_date, max_date)
+
+```
+
+values = c('Amoxicillin' = "#0CC6DE", 'Cephalexin' = "#34B233",   'Streptomycin' ="#002F5F", 'Tetracycline' ='#9672b5')) +
+
+```{r, fig.width = 6, fig.height=4}
+p_amox_yard
+p_amox_shed
+
+p_ceph_yard
+p_ceph_shed
+
+p_strep_yard
+p_strep_shed
+
+p_tetra_yard
+p_tetra_shed
+
+#readRDS(paste0(savepath, 'multivar_B1_yard_amox.rds'))
+```
+

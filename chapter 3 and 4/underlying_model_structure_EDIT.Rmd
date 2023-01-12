@@ -1,0 +1,768 @@
+---
+title: "Underlying model structure comparison - chapter 3"
+output: html_notebook
+---
+
+Aim: which underlying distribution to use; Poisson, Neg bio or ZIP. 
+- 1st comparison: Compare 3 distrubutions
+- 2nd comparison: Add  count effect to the poisson - is this then better or the same as neg bio?
+- kfold and PPC checks on all
+- Produce plots
+- Use high var group effects - as justified in "high_var_groupeffects.Rmd"
+
+References:
+https://avehtari.github.io/modelselection/CV-FAQ.html#1_Where_to_start
+https://statmodeling.stat.columbia.edu/2018/08/03/loo-cross-validation-approaches-valid/
+https://avehtari.github.io/modelselection/rats_kcv.html
+
+
+### Packages, functions and paths
+```{r}
+library(tidyverse)
+library(brms)
+library(gridExtra)
+library(tidybayes)
+library(loo)
+
+source("C:/local_files/phd_scripts/oh_star/thesis_themes.R")
+source("C:/local_files/phd_scripts/oh_star/modelling_uncertainty/posterior_predictive_checks/PPC/analysing_brms_models_functions.R")
+
+# notebook specific functions
+source('C:/local_files/phd_scripts/oh_star/chap3/underlying_model_structure_FUNCTIONS.R')
+
+data_path <- "C:/Users/lv13916/OneDrive - University of Bristol/Documents/PhD/projects/oh_star/data/rds_rda/modelling_uncertainty/data_with_locations/"
+model_save_path <- "C:/Users/lv13916/OneDrive - University of Bristol/Documents/PhD/projects/oh_star/data/rds_rda/modelling_uncertainty/model_comparisons/"
+figure_save_path <- "C:/Users/lv13916/OneDrive - University of Bristol/Documents/PhD/writing/chapter3/figures/"
+```
+
+
+### Making zero-balanced subsets of 3 representative AMs
+```{r}
+all_data <- readRDS(paste0(data_path, "/brms_format_OHSTAR_locations.Rds")) %>%
+  filter(!is.na(count) & environment != "individual")
+
+prop_zeros <- dim(all_data %>%
+  filter(plate != "plain" & count == 0))[1]/ dim(all_data)[1]
+prop_zeros
+
+
+set.seed(42)
+
+tetra_data <- balanced_random_sample(all_data, "tetra", 0.63, 100) %>%
+  select(assay, plate, am, count) %>%
+  mutate(log_dilution = ifelse(am == 0, log(0.1), log(1))) %>%
+  mutate(assay = as.factor(paste0(assay, "_tetra"))) %>%
+  droplevels()
+
+cipro_data <- balanced_random_sample(all_data, "cipro", 0.06, 100) %>%
+  select(assay, plate, am, count) %>%
+  mutate(log_dilution = ifelse(am == 0, log(0.1), log(1)))%>%
+  mutate(assay = as.factor(paste0(assay, "_cipro"))) %>%
+  droplevels()
+
+strep_data <- balanced_random_sample(all_data, "strep", 0.32, 100) %>%
+  select(assay, plate, am, count) %>%
+  mutate(log_dilution = ifelse(am == 0, log(0.1), log(1)))%>%
+  mutate(assay = as.factor(paste0(assay, "_strep"))) %>%
+  droplevels()
+
+ceph_data <- balanced_random_sample(all_data, "ceph", 0.28, 100) %>%
+  select(assay, plate, am, count) %>%
+  mutate(log_dilution = ifelse(am == 0, log(0.1), log(1)))%>%
+  mutate(assay = as.factor(paste0(assay, "_ceph"))) %>%
+  droplevels()
+
+amox_data <- balanced_random_sample(all_data, "amox", 0.60, 100) %>%
+  select(assay, plate, am, count) %>%
+  mutate(log_dilution = ifelse(am == 0, log(0.1), log(1)))%>%
+  mutate(assay = as.factor(paste0(assay, "_amox"))) %>%
+  droplevels()
+
+saveRDS(tetra_data, paste0(data_path, "balanced_tetra_100.Rds"))
+saveRDS(strep_data, paste0(data_path, "balanced_strep_100.Rds"))
+saveRDS(cipro_data, paste0(data_path, "balanced_cipro_100.Rds"))
+saveRDS(ceph_data, paste0(data_path, "balanced_ceph_100.Rds"))
+saveRDS(amox_data, paste0(data_path, "balanced_amox_100.Rds"))
+
+all_AMs_data <- rbind(tetra_data, strep_data, cipro_data, ceph_data, amox_data)
+
+saveRDS(all_AMs_data, paste0(data_path, "balanced_all_AMs_data.Rds"))
+
+```
+## add row number to data - id for each count
+```{r}
+all_AMs_data
+all_AMs_data_countid <-  all_AMs_data %>%
+  mutate(count_id = as.factor(paste0("count_", as.character(seq(1,dim(all_AMs_data)[1])))))
+```
+
+### Custom priors
+- High var to make group effects behave as fixed
+
+
+```{r}
+custom_priors_widergroupSD <- c(
+  #set_prior('normal(0, 5)', class = 'b', nlpar = 'interaction'),
+  #set_prior('normal(0, 5)', class = 'b', nlpar = 'main'),
+  set_prior('normal(10, 1)', class = 'sd', nlpar = 'interaction')#, # fix variance high using normal dist
+  #set_prior('normal(10, 1)', class = 'sd', nlpar = 'main'), # fix variance high using normal dist
+  #set_prior("normal(10, 1)", class = "sd", group = "assay", coef = "Intercept"),
+  #set_prior("normal(10, 1)", class = "sd", group = "assay")
+)
+
+# no intercepts, so b not needed, no assay effect in main, so main sd not needed
+get_prior(bf(
+    count ~ main + am * log_inv_logit(interaction), 
+    main ~ offset(log_dilution) + (1|assay),
+    interaction ~ (1|assay),
+    nl = T
+  ),
+  data = as.data.frame(all_AMs_data_countid), 
+  family = poisson(link = "log"))
+
+get_prior(bf(
+    count ~ offset(log_dilution) + am * log_inv_logit(interaction), 
+    interaction ~ (1|assay)-1,
+    nl = T
+  ),
+  data = as.data.frame(all_AMs_data_countid), 
+  family = poisson(link = "log"))
+
+custom_priors_widergroupSD
+
+
+```
+
+
+# First comparison - what distrubution is the best?
+- Use kfold and PPC
+- Remember to run kfold straight after running model
+- Use dataset with all AMs in
+- High number of folds
+
+### Poisson
+```{r}
+get_prior(bf(
+    count ~ main + am * log_inv_logit(interaction), 
+    main ~ offset(log_dilution) + (1|assay),
+    interaction ~ (1|assay) -1,
+    nl = T
+  ),
+  data = as.data.frame(all_AMs_data_countid), 
+  family = poisson(link = "log"))
+
+custom_priors_widergroupSD <- c(
+  #set_prior('normal(0, 5)', class = 'b', nlpar = 'interaction'),
+  #set_prior('normal(0, 5)', class = 'b', nlpar = 'main'),
+  set_prior('normal(10, 1)', class = 'sd', nlpar = 'interaction'), # fix variance high using normal dist
+  set_prior('normal(10, 1)', class = 'sd', nlpar = 'main')#, # fix variance high using normal dist
+  #set_prior("normal(10, 1)", class = "sd", group = "assay", coef = "Intercept"),
+  #set_prior("normal(10, 1)", class = "sd", group = "assay")
+)
+
+poisson_allAMs_EDIT <- brm(
+  bf(
+    count ~ main + am * log_inv_logit(interaction), 
+    main ~ offset(log_dilution) + (1|assay),
+    interaction ~ (1|assay) -1,
+    nl = T
+  ),
+  data = as.data.frame(all_AMs_data_countid), 
+  family = poisson(link = "log"), 
+  prior = custom_priors_widergroupSD,
+  iter = 4000, warmup = 2000, chains = 4, cores = 4, 
+  backend = "cmdstanr",
+  threads = threading(2), #8 cores used
+  silent = F,
+  save_pars = save_pars(group = TRUE)
+)
+
+poisson_allAMs_EDIT
+
+poisson_allAMs_EDIT <- brm(
+  bf(
+    count ~ main + am * log_inv_logit(interaction), 
+    main ~ offset(log_dilution) + (1|assay) -1,
+    interaction ~ (1|assay) -1,
+    nl = T
+  ),
+  data = as.data.frame(all_AMs_data_countid), 
+  family = poisson(link = "log"), 
+  prior = custom_priors_widergroupSD,
+  iter = 4000, warmup = 2000, chains = 4, cores = 4, 
+  backend = "cmdstanr",
+  threads = threading(2), #8 cores used
+  silent = F,
+  save_pars = save_pars(group = TRUE)
+)
+
+poisson_allAMs_EDIT
+saveRDS(poisson_allAMs_EDIT, paste0(model_save_path, "poisson_allAMs_EDIT_widergroupSD.Rds"))
+
+saveRDS(poisson_allAMs, paste0(model_save_path, "poisson_allAMs_widergroupSD.Rds"))
+```
+
+```{r}
+cv10sfolds <- kfold_split_stratified(K=20, x = poisson_allAMs$data$assay)
+
+kfold_poisson_allAMs <- loo::kfold(poisson_allAMs, K=20, folds = cv10sfolds, save_fits = TRUE, cores = 4)
+
+saveRDS(kfold_poisson_allAMs, paste0(model_save_path, "kfold_poisson_allAMs.Rds"))
+```
+
+
+### Neg bio
+```{r}
+negbio_allAMs <- brm(
+  bf(
+    count ~ main + am * log_inv_logit(interaction), 
+    main ~ offset(log_dilution),
+    interaction ~ (1|assay) -1,
+    nl = T
+  ),
+  data = as.data.frame(all_AMs_data_countid), 
+  family = negbinomial(link = "log"), 
+  prior = custom_priors_widergroupSD,
+  iter = 4000, warmup = 2000, chains = 4, cores = 4, 
+  backend = "cmdstanr",
+  threads = threading(2), #8 cores used
+  silent = F,
+  save_pars = save_pars(group = TRUE)
+)
+
+negbio_allAMs
+
+saveRDS(negbio_allAMs, paste0(model_save_path, "negbio_allAMs_widergroupSD.Rds"))
+
+cv10sfolds <- kfold_split_stratified(K=20, x = negbio_allAMs$data$assay)
+
+kfold_negbio_allAMs <- loo::kfold(negbio_allAMs, K=20, folds = cv10sfolds, save_fits = TRUE, cores = 4)
+
+saveRDS(kfold_negbio_allAMs, paste0(model_save_path, "kfold_negbio_allAMs.Rds"))
+
+```
+
+
+### ZIP
+```{r}
+zip_allAMs <- brm(
+  bf(
+    count ~ main + am * log_inv_logit(interaction), 
+    main ~ offset(log_dilution),
+    interaction ~ (1|assay) -1,
+    nl = T
+  ),
+  data = as.data.frame(all_AMs_data_countid), 
+  family = zero_inflated_poisson(link = "log"), 
+  prior = custom_priors_widergroupSD,
+  iter = 4000, warmup = 2000, chains = 4, cores = 4, 
+  backend = "cmdstanr",
+  threads = threading(2), #8 cores used
+  silent = F,
+  save_pars = save_pars(group = TRUE)
+)
+
+zip_allAMs
+
+saveRDS(zip_allAMs, paste0(model_save_path, "zip_allAMs_widergroupSD.Rds"))
+
+cv10sfolds <- kfold_split_stratified(K=20, x = zip_allAMs$data$assay)
+
+kfold_zip_allAMs <- loo::kfold(zip_allAMs, K=20, folds = cv10sfolds, save_fits = TRUE, cores = 4)
+
+saveRDS(kfold_zip_allAMs, paste0(model_save_path, "kfold_zip_allAMs.Rds"))
+
+```
+
+
+### Plotting strep comparisons between poisson, neg bio, zip
+```{r}
+# picking 50 assays randomly to plot:
+rand_sample <- sample(levels(poisson_allAMs$data$assay), 50, replace = FALSE) #for plotting
+
+#zip_allAMs
+#negbio_allAMs
+#poisson_allAMs
+
+# Poisson
+plot_poisson <- ppcheck_ordered_with_raw_count(model = poisson_allAMs,
+                                           data = poisson_allAMs$data,
+                                           subset = rand_sample,
+                                           title = "Poisson model")
+plot_poisson 
+
+ggsave(paste0(figure_save_path, "poisson_allAMs_ppcheck.jpg"), height = 6, width = 8)
+
+# Negbio
+plot_negbio <- ppcheck_ordered_with_raw_count(model = negbio_allAMs,
+                                           data = negbio_allAMs$data,
+                                           subset = rand_sample,
+                                           title = "Negative binomial model")
+plot_negbio
+ggsave(paste0(figure_save_path, "negbio_allAMs_ppcheck.jpg"), height = 6, width = 8)
+
+# ZIP
+plot_zip <- ppcheck_ordered_with_raw_count(model = zip_allAMs,
+                                           data = zip_allAMs$data,
+                                           subset = rand_sample,
+                                           title = "Zero-inflated Poisson model")
+plot_zip
+ggsave(paste0(figure_save_path, "zip_allAMs_ppcheck.jpg"), height = 6, width = 8)
+
+
+```
+
+
+## Plotting custom model parameters - r and zi
+- Note - in thesis shape parameter is called r, but called k in brms
+
+### Neg bio shape parameter
+```{r, fig.width = 8, fig.height = 6}
+
+poisson_allAMs <- readRDS(paste0(model_save_path, "poisson_allAMs_widergroupSD.Rds"))
+negbio_allAMs <- readRDS(paste0(model_save_path, "negbio_allAMs_widergroupSD.Rds"))
+
+
+round(mean((negbio_allAMs %>%
+  spread_draws(shape))$shape),1)
+round(quantile((negbio_allAMs %>%
+  spread_draws(shape))$shape, 0.025), 1)
+round(quantile((negbio_allAMs %>%
+  spread_draws(shape))$shape, 0.975), 1)
+
+mu <- mean(negbio_allAMs$data$count)
+
+r <- mean((negbio_allAMs %>%
+  spread_draws(shape))$shape)
+
+
+ggplot() +
+  geom_histogram(aes(x = rnbinom(100000, s=r, m= mu)), binwidth = 1, alpha = 0.5, fill = dual_blues[1]) +
+    geom_histogram(aes(x = rpois(100000, lambda= mu)), binwidth = 1, alpha = 0.5, fill = dual_blues[2]) +
+  ggtitle(paste("r =", as.character(round(r, 2))))+
+  xlab("Colony count")+
+  ylab("Count")+
+  ylim(0, 6000) +
+  xlim(0,150) +
+  theme_thesis() +
+  theme(axis.ticks.y = element_blank(),
+        axis.text.y = element_blank())
+
+#ggsave(paste0(figure_save_path, "negbio_versus_poisson_compare_allAMs.jpg"), height = 6, width = 8)
+
+negbio_allAMs %>%
+  spread_draws(shape) %>%
+  ggplot() +
+  geom_histogram(aes(x = shape), fill = dual_blues[1])+
+  theme_thesis() +
+  ylab("Count")+
+  xlab("Shape parameter (r)")
+
+#ggsave(paste0(figure_save_path, "negbio_allAMs_shape_para.jpg"), height = 6, width = 8)
+
+
+mu
+r
+```
+
+### ZIP zi parameter
+```{r}
+round(mean((zip_allAMs %>%
+  spread_draws(zi))$zi), 3)
+round(quantile((zip_allAMs %>%
+  spread_draws(zi))$zi, 0.025), 3)
+round(quantile((zip_allAMs %>%
+  spread_draws(zi))$zi, 0.975), 3)
+
+
+zip_allAMs %>%
+  spread_draws(zi) %>%
+  ggplot() +
+  geom_histogram(aes(x = zi), fill = dual_blues[2])+
+  theme_thesis() +
+  ylab("Count")+
+  xlab("Zero inflation parameter (zi)")
+
+ggsave(paste0(figure_save_path, "zip_allAMs_zi_para.jpg"), height = 6, width = 8)
+```
+
+
+
+
+## kfold comparisons
+```{r}
+loo_compare(kfold_poisson_allAMs, kfold_negbio_allAMs, kfold_zip_allAMs)
+
+kfold_poisson_allAMs
+kfold_negbio_allAMs
+kfold_zip_allAMs
+
+```
+
+
+
+# Second comparison - Possion with count effect versus negbio
+- Use streptomycin data
+- Run an edited possion model with a high var count effect
+
+```{r}
+custom_priors_widergroupSD_overdis <- c(
+  #set_prior('normal(0, 5)', class = 'b', nlpar = 'interaction'),
+  #set_prior('normal(0, 100)', class = 'b', nlpar = 'overdis'),
+  set_prior('normal(0, 5)', class = 'b', nlpar = 'main'),
+  set_prior('normal(10, 1)', class = 'sd', nlpar = 'interaction'), # fix variance high using normal dist
+  set_prior('student_t(3,0,10)', class = 'sd', nlpar = 'overdis')#,
+  #set_prior('normal(10, 1)', class = 'sd', nlpar = 'main') # fix variance high using normal dist
+)
+
+
+custom_priors_widergroupSD <- c(
+  #set_prior('normal(0, 5)', class = 'b', nlpar = 'interaction'),
+  set_prior('normal(0, 5)', class = 'b', nlpar = 'main'),
+  set_prior('normal(10, 1)', class = 'sd', nlpar = 'interaction')#, # fix variance high using normal dist
+  #set_prior('normal(10, 1)', class = 'sd', nlpar = 'main'), # fix variance high using normal dist
+  #set_prior("normal(10, 1)", class = "sd", group = "assay", coef = "Intercept"),
+  #set_prior("normal(10, 1)", class = "sd", group = "assay")
+)
+
+all_AMs_data_countid
+```
+
+### Model with overdis as nl parameter
+```{r}
+poisson_all_AMs_countef <- brm(
+  bf(
+    count ~ main + am * log_inv_logit(interaction) + overdis, 
+    overdis ~ (1|count_id) -1,
+    main ~ offset(log_dilution),
+    interaction ~ (1|assay) -1,
+    nl = T
+  ),
+  data = as.data.frame(all_AMs_data_countid), 
+  family = poisson(link = "log"), 
+  prior = custom_priors_widergroupSD_overdis,
+  iter = 4000, warmup = 2000, chains = 4, cores = 4, 
+  backend = "cmdstanr",
+  threads = threading(2), #8 cores used
+  silent = F,
+  save_pars = save_pars(group = TRUE)
+)
+
+saveRDS(poisson_all_AMs_countef, paste0(model_save_path, "poisson_all_AMs_countef.Rds"))
+poisson_all_AMs_countef
+# run kfold before clearing env
+cv10sfolds <- kfold_split_stratified(K=20, x = poisson_all_AMs_countef$data$assay)
+
+kfold_poisson_all_AMs_countef <- loo::kfold(poisson_all_AMs_countef, K=20, folds = cv10sfolds, save_fits = TRUE, cores = 4)
+
+saveRDS(kfold_poisson_all_AMs_countef, paste0(model_save_path, "kfold_poisson_all_AMs_countef.Rds"))
+#```
+plot_poisson_countef <- ppcheck_ordered_with_raw_count(model = poisson_all_AMs_countef,
+                                           data = poisson_all_AMs_countef$data,
+                                           subset = rand_sample,
+                                           title = "Poisson with added count group effect")+
+  ylim(10^-20, 1) 
+
+plot_poisson_countef
+
+ggsave(paste0(figure_save_path, "plot_poisson_countef_ppcheck.jpg"), height = 6, width = 8)
+
+```
+
+```{r}
+custom_priors_widergroupSD_overdis_EDIT <- c(
+  #set_prior('normal(0, 5)', class = 'b', nlpar = 'interaction'),
+  #set_prior('normal(0, 100)', class = 'b', nlpar = 'overdis'),
+  #set_prior('normal(0, 5)', class = 'b', nlpar = 'main'),
+  set_prior('normal(10, 1)', class = 'sd', nlpar = 'interaction'), # fix variance high using normal dist
+  set_prior('student_t(3,0,10)', class = 'sd', nlpar = 'overdis'),
+  set_prior('normal(10, 1)', class = 'sd', nlpar = 'main') # fix variance high using normal dist
+)
+
+poisson_all_AMs_countef_EDIT <- brm(
+  bf(
+    count ~ main + am * log_inv_logit(interaction) + overdis, 
+    overdis ~ (1|count_id) -1,
+    main ~ offset(log_dilution) + (1|assay) -1,
+    interaction ~ (1|assay) -1,
+    nl = T
+  ),
+  data = as.data.frame(all_AMs_data_countid), 
+  family = poisson(link = "log"), 
+  prior = custom_priors_widergroupSD_overdis_EDIT,
+  iter = 4000, warmup = 2000, chains = 4, cores = 4, 
+  backend = "cmdstanr",
+  threads = threading(2), #8 cores used
+  silent = F,
+  save_pars = save_pars(group = TRUE)
+)
+
+```
+
+
+### Editted model 24/11 - move count effect to first line of equation - don't make new non linear para
+```{r}
+all_AMs_data_countid
+
+
+poisson_all_AMs_countef_nooverdis <- brm(
+  bf(
+    count ~ main + am * log_inv_logit(interaction) + (1|count_id), 
+    main ~ offset(log_dilution) + (1|assay),
+    interaction ~ (1|assay),
+    nl = T
+  ),
+  data = as.data.frame(all_AMs_data_countid), 
+  family = poisson(link = "log"), 
+  prior = custom_priors_widergroupSD,
+  iter = 4000, warmup = 2000, chains = 4, cores = 4, 
+  backend = "cmdstanr",
+  threads = threading(2), #8 cores used
+  silent = F,
+  save_pars = save_pars(group = TRUE)
+)
+
+saveRDS(poisson_all_AMs_countef_nooverdis, paste0(model_save_path, "poisson_all_AMs_countef_nooverdis.Rds"))
+
+# run kfold before clearing env
+cv10sfolds <- kfold_split_stratified(K=20, x = poisson_all_AMs_countef$data$assay)
+
+kfold_poisson_all_AMs_countef <- loo::kfold(poisson_all_AMs_countef, K=20, folds = cv10sfolds, save_fits = TRUE, cores = 4)
+
+saveRDS(kfold_poisson_all_AMs_countef, paste0(model_save_path, "kfold_poisson_all_AMs_countef.Rds"))
+
+plot_poisson_countef <- ppcheck_ordered_with_raw_count(model = poisson_all_AMs_countef,
+                                           data = poisson_all_AMs_countef$data,
+                                           subset = rand_sample,
+                                           title = "Poisson with added count group effect") +
+  ylim(10^-30, 1) 
+
+plot_poisson_countef
+
+ggsave(paste0(figure_save_path, "plot_poisson_countef_ppcheck.jpg"), height = 6, width = 8)
+
+```
+
+#```{r}
+all_AMs_data_countid
+
+custom_priors_widergroupSD_overdis_normal05 <- c(
+  set_prior('normal(0, 5)', class = 'b', nlpar = 'overdis'),
+  set_prior('student_t(3,0,10)', class = 'sd', nlpar = 'overdis'),
+  set_prior('normal(0, 5)', class = 'b', nlpar = 'interaction'),
+  set_prior('normal(10, 1)', class = 'sd', nlpar = 'interaction'), # fix variance high using normal dist
+  set_prior('normal(0, 5)', class = 'b', nlpar = 'main'),
+  set_prior('normal(10, 1)', class = 'sd', nlpar = 'main') # fix variance high using normal dist
+)
+
+poisson_all_AMs_countef_normal05 <- brm(
+  bf(
+    count ~ main + am * log_inv_logit(interaction) + overdis, 
+    overdis ~ (1|count_id),
+    main ~ offset(log_dilution) + (1|assay),
+    interaction ~ (1|assay),
+    nl = T
+  ),
+  data = as.data.frame(all_AMs_data_countid), 
+  family = poisson(link = "log"), 
+  prior = custom_priors_widergroupSD_overdis_normal05,
+  iter = 4000, warmup = 2000, chains = 4, cores = 4, 
+  backend = "cmdstanr",
+  threads = threading(2), #8 cores used
+  silent = F,
+  save_pars = save_pars(group = TRUE)
+)
+
+saveRDS(poisson_all_AMs_countef_normal05, paste0(model_save_path, "poisson_all_AMs_countef_nooverdis_normal05.Rds"))
+#```
+#```{r}
+poisson_all_AMs_countef_normal05
+#```
+
+#```{r}
+poisson_all_AMs_countef <- readRDS(paste0(model_save_path, "poisson_all_AMs_countef.Rds"))
+
+poisson_all_AMs_countef
+#```
+
+### Removing global intercepts from model - should just be 1
+#```{r}
+custom_priors_widergroupSD_overdis
+
+custom_priors_widergroupSD_overdis_nointercept <- c(
+  set_prior('normal(0, 5)', class = 'b', nlpar = 'interaction'),
+  #set_prior('normal(0, 100)', class = 'b', nlpar = 'overdis'),
+  #set_prior('normal(0, 5)', class = 'b', nlpar = 'main'),
+  set_prior('normal(10, 1)', class = 'sd', nlpar = 'interaction'), # fix variance high using normal dist
+  set_prior('student_t(3,0,10)', class = 'sd', nlpar = 'overdis'),
+  set_prior('normal(10, 1)', class = 'sd', nlpar = 'main') # fix variance high using normal dist
+)
+
+poisson_all_AMs_countef_no_intercept <- brm(
+  bf(
+    count ~ main + am * log_inv_logit(interaction) + overdis, 
+    overdis ~ (1|count_id) -1,
+    main ~ offset(log_dilution) + (1|assay) -1,
+    interaction ~ (1|assay),
+    nl = T
+  ),
+  data = as.data.frame(all_AMs_data_countid), 
+  family = poisson(link = "log"), 
+  prior = custom_priors_widergroupSD_overdis_nointercept,
+  iter = 4000, warmup = 2000, chains = 4, cores = 4, 
+  backend = "cmdstanr",
+  threads = threading(2), #8 cores used
+  silent = F,
+  save_pars = save_pars(group = TRUE)
+)
+
+poisson_all_AMs_countef_no_intercept
+saveRDS(poisson_all_AMs_countef_no_intercept, paste0(model_save_path, "poisson_all_AMs_countef_no_intercept.Rds"))
+
+# run kfold before clearing env
+cv10sfolds <- kfold_split_stratified(K=20, x = poisson_all_AMs_countef_no_intercept$data$assay)
+
+kfold_poisson_all_AMs_countef_no_intercept <- loo::kfold(poisson_all_AMs_countef_no_intercept, K=20, folds = cv10sfolds, save_fits = TRUE, cores = 4)
+
+saveRDS(kfold_poisson_all_AMs_countef_no_intercept, paste0(model_save_path, "kfold_poisson_all_AMs_countef_no_intercept.Rds"))
+
+set.seed(42)
+rand_sample <- sample(levels(poisson_all_AMs_countef_no_intercept$data$assay), 50, replace = FALSE) #for plotting
+
+plot_poisson_countef <- ppcheck_ordered_with_raw_count(model = poisson_all_AMs_countef_no_intercept,
+                                           data = poisson_all_AMs_countef_no_intercept$data,
+                                           subset = rand_sample,
+                                           title = "Poisson with added count group effect, no intercept")
+
+plot_poisson_countef
+
+set.seed(42)
+rand_sample <- sample(levels(negbio_allAMs$data$assay), 50, replace = FALSE) #for plotting
+
+negbio_allAMs <- readRDS(paste0(model_save_path, "negbio_allAMs_widergroupSD.Rds"))
+
+plot_negbio <- ppcheck_ordered_with_raw_count(model = negbio_allAMs,
+                                           data = negbio_allAMs$data,
+                                           subset = rand_sample,
+                                           title = "Neg bio")
+
+plot_poisson_countef
+plot_negbio
+kfold_poisson_all_AMs_countef_no_intercept
+#```
+
+### Results comparison
+```{r}
+saveRDS(kfold_poisson_all_AMs_countef_no_intercept, paste0(model_save_path, "kfold_poisson_all_AMs_countef_no_intercept.Rds"))
+saveRDS(kfold_negbio_allAMs, paste0(model_save_path, "kfold_negbio_allAMs.Rds"))
+saveRDS(kfold_poisson_allAMs, paste0(model_save_path, "kfold_poisson_allAMs.Rds"))
+
+
+kfold_poisson_allAMs <- readRDS(paste0(model_save_path, "kfold_poisson_allAMs.Rds"))
+kfold_negbio_allAMs <- readRDS(paste0(model_save_path, "kfold_negbio_allAMs.Rds"))
+kfold_zip_allAMs <- readRDS(paste0(model_save_path, "kfold_zip_allAMs.Rds"))
+
+
+kfold_poisson_allAMs_countef_no_intercept <- readRDS(paste0(model_save_path, "kfold_poisson_all_AMs_countef_no_intercept.Rds"))
+poisson_all_AMs_countef_no_intercept
+
+loo_compare_results <- loo_compare(
+                                   kfold_poisson_allAMs_countef_no_intercept,
+                                   kfold_zip_allAMs)
+
+loo_compare_results
+saveRDS(loo_compare_results, paste0(model_save_path, "loo_compare_results.Rds"))
+
+loo_compare_results <- readRDS(paste0(model_save_path, "loo_compare_results.Rds"))
+loo_compare_results
+saveRDS(poisson_all_AMs_countef_no_intercept, paste0(model_save_path, "poisson_all_AMs_countef_no_intercept.Rds"))
+
+
+
+attr(kfold_poisson_allAMs,"yhash")
+poisson_all_AMs_countef_no_intercept
+prior_summary(poisson_all_AMs_countef_no_intercept)
+
+negbio_allAMs <- readRDS(paste0(model_save_path, "negbio_allAMs_widergroupSD.Rds"))
+poisson_allAMs_widergroupSD <- readRDS(paste0(model_save_path, "poisson_allAMs_widergroupSD.Rds"))
+
+poisson_allAMs_widergroupSD
+prior_summary(poisson_allAMs_widergroupSD)
+negbio_allAMs
+
+```
+
+### Non-wide priors
+```{r}
+get_prior(bf(
+    count ~ main + am * log_inv_logit(interaction), 
+    main ~ offset(log_dilution) + (1|assay),
+    interaction ~ (1|assay) -1 ,
+    nl = T
+  ),
+  data = as.data.frame(all_AMs_data_countid), 
+  family = poisson(link = "log"))
+
+custom_priors_normal_SD <- c(
+  #set_prior('normal(0, 5)', class = 'b', nlpar = 'interaction'),
+  set_prior('normal(0, 5)', class = 'b', nlpar = 'main'),
+  set_prior('student_t(3,0,4.3)', class = 'sd', nlpar = 'interaction'), 
+  set_prior('student_t(3,0,4.3)', class = 'sd', nlpar = 'main')#, 
+  #set_prior("normal(10, 1)", class = "sd", group = "assay", coef = "Intercept"),
+  #set_prior("normal(10, 1)", class = "sd", group = "assay")
+)
+
+poisson_allAMs_EDIT_nonwidepriors <- brm(
+  bf(
+    count ~ main + am * log_inv_logit(interaction), 
+    main ~ offset(log_dilution) + (1|assay),
+    interaction ~ (1|assay) -1,
+    nl = T
+  ),
+  data = as.data.frame(all_AMs_data_countid), 
+  family = poisson(link = "log"), 
+  prior = custom_priors_normal_SD,
+  iter = 4000, warmup = 2000, chains = 4, cores = 4, 
+  backend = "cmdstanr",
+  threads = threading(2), #8 cores used
+  silent = F,
+  save_pars = save_pars(group = TRUE)
+)
+
+poisson_allAMs_EDIT_nonwidepriors
+
+saveRDS(poisson_allAMs_EDIT_nonwidepriors, paste0(model_save_path, "poisson_allAMs_EDIT_nonwidepriors.Rds"))
+
+```
+
+### Removing intercept from main
+```{r}
+custom_priors_widergroupSD <- c(
+  #set_prior('normal(0, 5)', class = 'b', nlpar = 'interaction'),
+  #set_prior('normal(0, 5)', class = 'b', nlpar = 'main'),
+  set_prior('normal(10, 1)', class = 'sd', nlpar = 'interaction')#, # fix variance high using normal dist
+  #set_prior('normal(10, 1)', class = 'sd', nlpar = 'main'), # fix variance high using normal dist
+  #set_prior("normal(10, 1)", class = "sd", group = "assay", coef = "Intercept"),
+  #set_prior("normal(10, 1)", class = "sd", group = "assay")
+)
+
+
+poisson_allAMs_EDIT_nointercepts <- brm(
+  bf(
+    count ~ main + am * log_inv_logit(interaction), 
+    main ~ offset(log_dilution) + (1|assay) -1,
+    interaction ~ (1|assay) -1,
+    nl = T
+  ),
+  data = as.data.frame(all_AMs_data_countid), 
+  family = poisson(link = "log"), 
+  prior = custom_priors_widergroupSD,
+  iter = 4000, warmup = 2000, chains = 4, cores = 4, 
+  backend = "cmdstanr",
+  threads = threading(2), #8 cores used
+  silent = F,
+  save_pars = save_pars(group = TRUE)
+)
+```
+
+

@@ -1,0 +1,508 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Creating datasets for investigating the effect of temperature and humidity on AMR
+
+# Set-up
+```{r}
+library(tidyverse)
+library(brms)
+options(mc.cores = 8, brms.backend = "cmdstanr") # allows threading
+library(tryCatchLog)
+library(loo)
+library(lubridate)
+library(tidybayes)
+```
+
+# Paths
+```{r}
+datapath <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/rds_rda/modelling_uncertainty/data_with_locations/'
+savepath <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/rds_rda/final_models_new/'
+```
+
+
+
+```{r}
+all_data_brms <- readRDS(paste0(datapath, "/brms_format_OHSTAR_locations.Rds")) %>%
+  select(-weight_g, -diluent_ml, -longitudinal_location, -days_in_study)
+
+all_assay <- all_data_brms %>%
+  select(-count, -plate, -am, -log_dilution) %>%
+  distinct() 
+
+all_assay %>%
+  count(assay) %>%
+  filter(n !=1)
+
+amr_data <- all_data_brms %>%
+  select(farm, date, assay, plate, count, am, log_dilution)
+
+amr_data %>%
+  filter(plate == 'plain' & count == 0)
+```
+
+### Categorising meta data on location and age group
+```{r}
+meta_data_path <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/raw/farm_sample_metadata.csv'
+
+assay_met_data <- read.csv(meta_data_path, 
+         header = TRUE, sep = ",",
+         na.strings	 = c('NA', '#N/A', 'N/A', 'na', ' '),
+         colClasses = 'character') %>%
+  select(Unique.sample.number, Adult.Dry, Heifer.sample., Footpath.Rectal.Cowpat.Other, housed.or.outdoor.environment, Sample.location.anon)
+
+names(assay_met_data) <- c('assay', 'adult_dry', 'heifer', 'footpath', 'environment', 'location_txt')
+
+assay_met_data <- assay_met_data %>%
+  mutate(environment = as.factor(tolower(environment)),
+         adult_dry = as.factor(tolower(adult_dry)),
+         heifer = as.factor(tolower(heifer)),
+         footpath = as.factor(tolower(footpath)),
+         ) %>%
+  filter(environment != 'individual')
+
+assay_met_data %>%
+  filter(footpath == 'B')
+
+assay_met_data %>%
+  filter(footpath == 'f') %>%
+  filter(environment == 'housed')
+
+assay_locations_and_ages <- assay_met_data %>%
+    mutate(sample_type = paste(adult_dry, heifer, footpath)) %>%
+  count(location_txt, environment,sample_type ) %>%
+  arrange(-n)
+
+write.csv(assay_locations_and_ages,
+          file = '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/raw/assay_meta_summary_for_manual_matching.csv') 
+
+
+assay_meta_data_final <- read.csv(file = '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/raw/assay_meta_summary_matched.csv', 
+         header = TRUE, sep = ",",
+         na.strings	 = c('NA', '#N/A', 'N/A', 'na', ' '),
+         colClasses = 'character')
+
+assay_met_data %>%
+  mutate(sample_type = paste(adult_dry, heifer, footpath)) %>%
+  left_join(assay_meta_data_final, by = c('environment', 'location_txt', 'sample_type')) %>%
+  select(assay, location_cat, age_cat, environment_cat) %>%
+  filter(is.na(location_cat) | is.na(age_cat) | is.na(environment_cat))
+
+# 30 assays have missing data, exclude from sample  
+
+assay_location_age_env_categorisation <- assay_met_data %>%
+  mutate(sample_type = paste(adult_dry, heifer, footpath)) %>%
+  left_join(assay_meta_data_final, by = c('environment', 'location_txt', 'sample_type')) %>%
+  select(assay, location_cat, age_cat, environment_cat, location_txt) %>%
+  mutate(location_txt = tolower(str_trim(location_txt, side = 'both')),
+         location_txt = ifelse(location_txt == '', NA, location_txt),
+         location_txt = as.factor(location_txt)) %>%
+    filter(!is.na(location_cat) & !is.na(age_cat) & !is.na(environment_cat) & !is.na(location_txt))
+
+assay_location_age_env_categorisation %>%
+  filter(environment_cat == 'housing') %>%
+  count(location_cat, age_cat)
+
+assay_location_age_env_categorisation %>%
+  filter(environment_cat == 'housing') %>%
+  count(age_cat)
+
+assay_location_age_env_categorisation %>%
+  filter(environment_cat == 'pasture') %>%
+  count(location_cat)
+```
+
+## Select assays to use for each analysis 
+
+### DF1: Samples from farm housing - adults and heifers 
+```{r}
+df1 <- assay_location_age_env_categorisation %>%
+  filter(environment_cat == 'housing') %>%
+  filter(age_cat %in% c('adult', 'heifer'))
+
+# 3,577 assays
+
+df1 %>%
+  count(age_cat, location_cat)
+
+```
+
+
+### DF2: Samples from farm housing - youngstock
+```{r}
+df2 <- assay_location_age_env_categorisation %>%
+  filter(environment_cat == 'housing') %>%
+  filter(age_cat %in% c('youngstock'))
+
+# 193 assays
+
+df2 %>%
+  count(age_cat, location_cat)
+```
+
+
+### DF3: Samples from pastures
+```{r}
+df3 <- assay_location_age_env_categorisation %>%
+  filter(environment_cat == 'pasture')
+
+# 839 assays
+
+df3 %>%
+  count(age_cat, location_cat)
+```
+
+## Creating whole datasets
+### DF1
+```{r}
+df1_assays <- as.character(unique(df1$assay))
+length(df1_assays)
+# 3577 assays
+
+df1_amr_data <- amr_data %>%
+  filter(assay %in% c(df1_assays))
+# 20,574 rows
+
+length(as.character(unique(df1_amr_data$assay)))
+# 3183 assays remain
+
+df1 <- df1_amr_data %>%
+  left_join(assay_location_age_env_categorisation, by = 'assay') %>%
+  mutate(location_cat = ifelse(location_cat == 'small_group_calf_housing', 'shed_pen', location_cat))
+
+# creating a unique location ID for specific named location on farm
+df1 <- df1 %>%
+  mutate(location_id_txt = paste0(farm, location_cat, location_txt))
+
+all_id_txt <- unique(df1$location_id_txt)
+location_id_spine <- tibble('location_id_txt' = all_id_txt,
+       'location_id' = paste0('id_', seq(1, length(all_id_txt))))
+
+df1 <- df1 %>%
+  left_join(location_id_spine, by = 'location_id_txt') %>%
+  select(-location_id_txt, -location_txt) %>%
+  mutate(location_id = as.factor(location_id))
+
+df1
+
+### summary stats 
+df1_summary <- df1 %>%
+  select(-plate, -count, -log_dilution, -am) %>%
+  distinct()
+
+df1_summary %>%
+  count(farm)
+# 53
+
+df1_summary %>%
+  count(age_cat, location_cat)
+
+# average visits to each specific location
+n_visits <- (df1_summary %>%
+  count(location_id))$n 
+median(n_visits) # 3
+quantile(n_visits, 0.25) # 1
+quantile(n_visits, 0.75) # 6
+min(n_visits) #1
+max(n_visits) #42
+
+
+df1_summary %>%
+  mutate(month_sampled = month(date, label = T, abbr = T),
+         year_sampled = floor_date(date, unit = 'years')) %>%
+  count(month_sampled, age_cat, location_cat) %>%
+  ggplot() +
+  geom_point(aes(x = month_sampled, y = n, colour = location_cat, group = location_cat)) +
+  geom_line(aes(x = month_sampled, y = n, colour = location_cat, group = location_cat)) +
+  facet_wrap(~age_cat, nrow = 2) +
+  scale_colour_manual(values = c(dual_blues[2], dual_greens[1],  dual_blues[1], dual_greens[2])) +
+  theme_minimal() +
+  xlab('Month sample collected') +
+  ylab('Number of samples')
+
+df1_summary %>%
+  mutate(month_sampled = month(date, label = T, abbr = T),
+         year_sampled = as.factor(floor_date(date, unit = 'years'))) %>%
+  count(year_sampled, month_sampled, age_cat) %>%
+  ggplot() +
+  geom_point(aes(x = month_sampled, y = n, colour = year_sampled, group = year_sampled)) +
+  geom_line(aes(x = month_sampled, y = n, colour = year_sampled, group = year_sampled)) +
+  facet_wrap(~age_cat, nrow = 2) +
+  scale_colour_manual(values = c('darkgrey', '#674C7d')) +
+  theme_minimal() +
+  xlab('Month sample collected') +
+  ylab('Number of samples')
+
+df1_summary %>%
+  count(age_cat, location_cat)
+
+df1 %>%
+  filter(plate == 'plain' & count == 0) %>%
+  count(location_cat)
+```
+### Making variables needed for random effects - each location over time
+```{r}
+df1_sample_groups <- df1 %>%
+  mutate(sample_location = paste0(farm, '_', location_cat))
+
+starts <- df1_sample_groups%>%
+  group_by(sample_location) %>%
+  summarise(study_start = min(date))
+
+df1 <- df1_sample_groups %>%
+  left_join(starts, by = 'sample_location') %>%
+  mutate(day_of_study = as.numeric(date - study_start))
+
+# 130 sample locations
+
+df1 %>%
+  group_by(sample_location) %>%
+  summarise(study_length = max(day_of_study)) %>%
+  ggplot() +
+  geom_histogram(aes(x = study_length), fill = dual_blues[2], alpha = 0.6) +
+  theme_minimal() +
+  xlab('Study length at single location') +
+  ylab('Count')
+
+median(df1$day_of_study)
+quantile(df1$day_of_study, 0.25)
+quantile(df1$day_of_study, 0.75)
+
+```
+
+# Getting and joining weather data
+```{r}
+met_path <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/raw/met_office/ceda weather data/hourly_weather_obs/'
+met_data <- read.csv(paste0(met_path, 'combined_midas_data.csv'),
+                     header = TRUE, sep = ",", na.strings	 = c('NA', '#N/A', 'N/A', 'na'), colClasses = 'character')
+met_data
+met_data_clean <- met_data %>%
+  mutate(ob_date = floor_date(dmy_hm(ob_time), 'day')) %>%
+  group_by(ob_date, location) %>%
+  summarise(location = location,
+            relative_humidity_daily_mean = mean(as.numeric(rltv_hum), na.rm = T),
+            temperature_daily_mean = mean(as.numeric(air_temperature), na.rm = T),
+            below_freezing = ifelse(min(as.numeric(air_temperature)) <= 0, 1, 0),
+            minimum_temperature_daily = min(as.numeric(air_temperature), na.rm = T),
+            maximum_temperature_daily = max(as.numeric(air_temperature), na.rm = T)) %>%
+  mutate(weather_station_name = as.factor(location))
+met_data_clean 
+names(met_data)
+
+station_matches <- read.csv(paste0('/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/oh_star/data/raw/met_office/', 'farm_weatherstation_matches.csv'),
+                     header = TRUE, sep = ",", na.strings	 = c('NA', '#N/A', 'N/A', 'na'), colClasses = 'character')
+station_matches <- station_matches %>%
+  mutate(weather_station_name = factor(weather_station_anon))
+levels(station_matches$weather_station_name) <- c('yeovilton', 'lyneham', 'larkhill', 'north wyke', 'chivenor')
+station_matches
+
+joined_weather_data <- met_data_clean %>%
+  left_join(station_matches, by = 'weather_station_name') %>%
+  mutate(date = as.Date(ob_date)) %>%
+  select(farm, date, relative_humidity_daily_mean, temperature_daily_mean, below_freezing, minimum_temperature_daily, maximum_temperature_daily)
+
+joined_weather_data
+
+### Lagging
+cum_daterange <- function(data, var, location_name, date_min, date_max){
+  time_window <- data %>%
+    filter(location == location_name) %>%
+    filter(date <= date_max & date >= date_min)
+  
+  if(var == 'h'){
+    res <- mean(time_window$relative_humidity_daily_mean, na.rm = T)
+  }
+  if(var == 't'){
+    res <- mean(time_window$temperature_daily_mean, na.rm = T)
+  }
+  if(var == 'f'){
+    res <- sum(time_window$below_freezing, na.rm = T)
+  }
+  
+  if(var == 'min'){
+    res <- min(time_window$minimum_temperature_daily, na.rm = T)
+  }
+  
+   if(var == 'max'){
+    res <- max(time_window$maximum_temperature_daily, na.rm = T)
+  }
+  
+  return(res)
+}
+
+joined_weather_data_locations <- joined_weather_data %>%
+  ungroup() %>%
+  select(location, date, relative_humidity_daily_mean, temperature_daily_mean, below_freezing, minimum_temperature_daily, maximum_temperature_daily) %>%
+  distinct()
+
+joined_weather_data_locations_lag <- joined_weather_data_locations %>%
+  mutate(date_1week = date - days(7),
+         date_2week = date - days(14),
+         date_4week = date - days(28)) %>%
+  rowwise() %>%
+  mutate(below_freezing_1week = cum_daterange(joined_weather_data_locations, 'f', location, date_1week, date),
+         below_freezing_2week = cum_daterange(joined_weather_data_locations, 'f', location, date_2week, date),
+         below_freezing_3week = cum_daterange(joined_weather_data_locations, 'f', location, date_4week, date),
+         mean_week_temperature = cum_daterange(joined_weather_data_locations, 't', location, date_1week, date),
+         mean_week_humidity = cum_daterange(joined_weather_data_locations, 'h', location, date_1week, date),
+         mean_2week_temperature = cum_daterange(joined_weather_data_locations, 't', location, date_2week, date),
+         mean_2week_humidity = cum_daterange(joined_weather_data_locations, 'h', location, date_2week, date),
+         mean_4week_temperature = cum_daterange(joined_weather_data_locations, 't', location, date_4week, date),
+         mean_4week_humidity = cum_daterange(joined_weather_data_locations, 'h', location, date_4week, date),
+         minimum_temperature_1week = cum_daterange(joined_weather_data_locations, 'min', location, date_1week, date),
+         maximum_temperature_1_week = cum_daterange(joined_weather_data_locations, 'max', location, date_1week, date)) 
+
+joined_weather_data_locations_lag <- joined_weather_data_locations_lag %>%
+  filter(!is.nan(date)) %>%
+  filter(!is.na(date)) %>%
+  select(-date_1week, -date_2week, -date_4week)
+
+joined_weather_data_locations_lag <- joined_weather_data_locations_lag %>%
+  rename('weather_station_name' ='location')
+
+
+saveRDS(joined_weather_data_locations_lag, paste0(datapath, 'lagged_weather_by_location.Rds'))  
+
+mean(as.numeric(met_data_clean$relative_humidity_daily_mean), na.rm = T, 0.975)
+-7.2
+10.9 
+31
+
+83.6
+48.8
+97.2
+met_data_clean
+met_data_clean_edit <- met_data_clean %>%
+  distinct() %>%
+  mutate(season = as.factor(month(ob_date)))
+
+levels(met_data_clean_edit$season) <- c('Winter', 'Winter', 'Spring', 'Spring', 'Spring', 'Summer', 'Summer', 'Summer', 'Autumn', 'Autumn', 'Autumn', 'Winter')
+
+met_data_clean_edit %>%
+  filter(!is.na(season)) %>%
+  ggplot() + 
+  geom_point(aes(y =  relative_humidity_daily_mean, x = temperature_daily_mean), colour = dual_blues[2], alpha = 0.3) +
+  facet_wrap(~season) +
+  theme_minimal() +
+  xlab('Mean daily air temperature (celsius)') +
+  ylab('Mean daily relative humidity (%)')
+```
+
+
+### Making DF1 sets
+```{r, fig.height=6, fig.width = 8}
+joined_weather_data_locations_lag <- readRDS(paste0(datapath, 'lagged_weather_by_location.Rds'))  
+station_matches
+df1
+df1_brms <- df1 %>%
+  left_join(station_matches, by = 'farm') %>%
+  left_join(joined_weather_data_locations_lag, by = c('weather_station_name', 'date')) %>%
+  select(-weather_station_name, -X, -X.1, -weather_station_anon) %>%
+  mutate(month_sampled = as.factor(month(date)),
+         season = month_sampled)
+
+levels(df1_brms$season) <- c('Winter', 'Winter', 'Spring', 'Spring', 'Spring', 'Summer', 'Summer', 'Summer', 'Autumn', 'Autumn', 'Autumn', 'Winter')
+
+# separating out 0 assays before scaling 
+df1_brms_0_assays <- unique((df1_brms %>%
+  filter(plate == 'plain' & count == 0))$assay)
+
+df1_with_no_bac_assays <- df1_brms %>%
+  filter(plate == 'plain' & count == 0)
+saveRDS(df1_with_no_bac_assays, paste0(datapath, 'df1_with_no_bac_assays.Rds'))  
+
+df1_brms <- df1_brms %>%
+  filter(!(assay %in% c(df1_with_no_bac_assays$assay)))
+
+df1_brms_scaled <- df1_brms %>%
+  mutate(relative_humidity_daily_mean_S = scale(logit_scaled(relative_humidity_daily_mean/100)),
+         mean_week_humidity_S = scale(logit_scaled(mean_week_humidity/100)),
+         mean_2week_humidity_S = scale(logit_scaled(mean_2week_humidity/100)),
+         mean_4week_humidity_S = scale(logit_scaled(mean_4week_humidity/100)),
+         temperature_daily_mean_S = scale(temperature_daily_mean),
+         mean_week_temperature_S = scale(mean_week_temperature),
+         mean_2week_temperature_S = scale(mean_2week_temperature),
+         mean_4week_temperature_S = scale(mean_4week_temperature),
+         minimum_temperature_1week_S = scale(minimum_temperature_1week),
+         maximum_temperature_1week_S = scale(maximum_temperature_1_week),
+         minimum_temperature_daily_S = scale(minimum_temperature_daily),
+         maximum_temperature_daily_S = scale(maximum_temperature_daily),
+         )
+
+df1_brms_scaled_cleaned <- df1_brms_scaled %>%
+  mutate(below_freezing = ifelse(below_freezing > 0, 1, 0),
+         below_freezing_1week = ifelse(below_freezing_1week > 0, 1, 0),
+         below_freezing_2week = ifelse(below_freezing_2week > 0, 1, 0),
+         below_freezing_4week = ifelse(below_freezing_3week > 0, 1, 0),    # naming error
+         age_cat = as.factor(age_cat),
+         location_cat = as.factor(location_cat),
+         sample_location = as.factor(sample_location),
+         location_id = as.factor(location_id))
+
+high_temp <- quantile(df1_brms_scaled_cleaned$temperature_daily_mean, 2/3)
+high_humid <- quantile(df1_brms_scaled_cleaned$relative_humidity_daily_mean, 2/3)
+low_temp <- quantile(df1_brms_scaled_cleaned$temperature_daily_mean, 1/3)
+low_humid <- quantile(df1_brms_scaled_cleaned$relative_humidity_daily_mean, 1/3)
+
+
+df1_brms_scaled_cleaned <- df1_brms_scaled_cleaned %>%
+  mutate(temp_cat = ifelse(temperature_daily_mean >= high_temp, 'hot', 
+                           ifelse(temperature_daily_mean <= low_temp, 'cold', 'mild')),
+         hum_cat = ifelse(relative_humidity_daily_mean >= high_humid, 'damp', 
+                           ifelse(relative_humidity_daily_mean <= low_humid, 'dry', 'mild')),
+         temp_hum_cat = paste0(temp_cat, '_', hum_cat),
+         temp_hum_cat = as.factor(ifelse(str_detect(temp_hum_cat, 'mild'), 'mild', temp_hum_cat))) %>%
+  select(-temp_cat, hum_cat)
+
+df1_brms_scaled_cleaned %>%
+  ggplot() +
+  geom_point(aes(x = relative_humidity_daily_mean, y =temperature_daily_mean, colour = temp_hum_cat, shape = season)) +
+  theme_minimal() +
+  xlab('Relative humidity (%)') +
+  ylab('Temperature')
+
+```
+
+
+```{r}
+df1_brms_scaled_cleaned <- df1_brms_scaled_cleaned %>%
+  mutate(location_age = as.factor(paste0(location_cat, '_', age_cat)))
+
+df1_brms_scaled_cleaned %>%
+  count(location_age) %>%
+  mutate(real_n = n/6,
+         per = round(real_n/3183*100, 1))
+
+levels(df1_brms_scaled_cleaned$season)
+levels(df1_brms_scaled_cleaned$age_cat)
+levels(df1_brms_scaled_cleaned$location_cat)
+levels(df1_brms_scaled_cleaned$temp_hum_cat)
+levels(df1_brms_scaled_cleaned$location_age)
+
+df1_brms_scaled_cleaned %>%
+  count(assay) %>%
+  filter(n !=6)
+
+df1_amox_brms <- df1_brms_scaled_cleaned %>%
+  filter(plate %in% c('plain', 'amox'))
+
+df1_ceph_brms <- df1_brms_scaled_cleaned %>%
+  filter(plate %in% c('plain', 'ceph'))
+
+df1_cipro_brms <- df1_brms_scaled_cleaned %>%
+  filter(plate %in% c('plain', 'cipro'))
+
+df1_strep_brms <- df1_brms_scaled_cleaned %>%
+  filter(plate %in% c('plain', 'strep'))
+
+df1_tetra_brms <- df1_brms_scaled_cleaned %>%
+  filter(plate %in% c('plain', 'tetra'))
+
+saveRDS(df1_amox_brms, paste0(datapath, 'df1_amox_brms.Rds'))  
+saveRDS(df1_ceph_brms, paste0(datapath, 'df1_ceph_brms.Rds'))  
+saveRDS(df1_cipro_brms, paste0(datapath, 'df1_cipro_brms.Rds'))  
+saveRDS(df1_strep_brms, paste0(datapath, 'df1_strep_brms.Rds'))  
+saveRDS(df1_tetra_brms, paste0(datapath, 'df1_tetra_brms.Rds'))  
+```

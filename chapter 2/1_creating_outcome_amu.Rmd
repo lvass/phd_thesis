@@ -1,0 +1,518 @@
+---
+title: "Creating outcome data - AMU"
+output: html_notebook
+---
+
+### Load libraries and path
+```{r}
+library(tidyverse)
+library(lubridate)
+path <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/synergy/data/'
+setwd(path)
+```
+
+```{r}
+synergy_abs_mgkg <- readRDS(paste0(path, 'amu/synergy_abs_mgkg.Rds'))
+synergy_abs_mgkg %>%
+  count(premises_id)
+
+```
+
+### Adding label for admin route
+- adding label for admin route - systemic, IM or topical
+- Also tidying groups and adding an im type label - DCT or LCT
+```{r}
+synergy_abs_mgkg_tidy <- synergy_abs_mgkg %>%
+  mutate(pharmaceutical_form = as.factor(ifelse(abs_id == 'abs_248', 'Solution for injection',
+                                      ifelse(abs_id == 'abs_99', 'Powder for oral solution', 
+                                             ifelse(abs_id == 'abs_175', 'Eye ointment',
+                                             pharmaceutical_form)))),
+         admin_route_group = as.factor(as.character(pharmaceutical_form)),
+         year = floor_date(date, 'years'),
+         premises_year = paste0(premises_id, '_', year))
+
+levels(synergy_abs_mgkg_tidy$admin_route_group) <- c(rep('topical', 3), 'systemic', rep('IM', 3), rep('systemic', 9))
+
+synergy_abs_mgkg_tidy <- synergy_abs_mgkg_tidy %>%
+  mutate(im_type = ifelse(admin_route_group == 'IM', 
+                          ifelse(str_detect(tolower(med_name), 'dry|dc'), 'DCT', 'LCT'),
+                           NA))
+
+synergy_abs_mgkg_tidy
+saveRDS(synergy_abs_mgkg_tidy, paste0(path, 'synergy_abs_mgkg_tidy.Rds'))
+                                      
+```
+
+### Removing premises/years with <5 sales and incomplete year (2019)
+```{r, fig.height = 10, fig.wdith = 5}
+few_sales <- synergy_abs_mgkg_tidy %>%
+    group_by(year, premises_id, premises_year) %>%
+    summarise(total_mgkg = sum(abs_mg_kg, na.rm = T),
+              n = n()) %>%
+  filter(n < 5) %>%
+  droplevels() # less than 5 sales in 1 year, remove
+
+# remove years with less than 5 product sales
+synergy_abs_mgkg_tidy <- synergy_abs_mgkg_tidy %>%
+  filter(!(premises_year %in% c(few_sales$premises_year))) %>%
+  filter(year != '2019-01-01' & year != '2009-01-01')
+
+synergy_abs_mgkg_tidy %>%
+  group_by(month, premises_id, year) %>%
+  summarise(any_abs_sale = ifelse(sum(abs_mg_kg, na.rm = T) > 0, 1, 0)) %>%
+  ungroup() %>%
+  count(any_abs_sale) # very few months have 0 sales
+
+# ----remove years with incomplete data
+# get start and end years
+synergy_abs_mgkg_tidy %>%
+  ungroup() %>%
+  count(month, premises_id, year) %>%
+  count(premises_id, year) %>%
+  group_by(year) %>%
+  summarise(mean(n))
+
+full_years <- synergy_abs_mgkg_tidy %>%
+  ungroup() %>%
+  group_by(premises_id) %>%
+  summarise(start_month = min(month),
+            end_month = max(month)) %>% 
+  mutate(start_month_num = month(start_month),
+         end_month_num = month(end_month),
+         first_full_year = ifelse(start_month_num != 1, year(start_month) + 1, year(start_month)),
+         last_full_year = ifelse(end_month_num != 12, year(end_month) - 1, year(end_month))) %>%
+  select(premises_id, first_full_year, last_full_year)
+
+full_years
+
+synergy_abs_mgkg_tidy_full_years <- synergy_abs_mgkg_tidy %>%
+  left_join(full_years, by = 'premises_id') %>%
+  mutate(year_num = year(year)) %>%
+  mutate(remove_record = ifelse(year_num < first_full_year | year_num > last_full_year, 1, 0)) %>%
+  filter(remove_record == 0) %>%
+  select(-remove_record)
+
+saveRDS(synergy_abs_mgkg_tidy_full_years, paste0(path, 'synergy_abs_mgkg_tidy_full_years.Rds'))
+```
+
+### Outcome 1: mg/kg ESVAC method
+- Topicals not included
+```{r}
+synergy_abs_mgkg_tidy_full_years <- readRDS(paste0(path, 'synergy_abs_mgkg_tidy_full_years.Rds'))
+
+total_mgkg_with_topicals <- synergy_abs_mgkg_tidy_full_years %>%
+    group_by(premises_year, year, premises_id) %>%
+    summarise(total_mgkg = sum(abs_mg_kg, na.rm = T)) 
+  
+total_mgkg_esvac <- synergy_abs_mgkg_tidy_full_years %>%
+  filter(admin_route_group != 'topical') %>%
+    group_by(premises_year, year, premises_id) %>%
+    summarise(total_mgkg_esvac = sum(abs_mg_kg, na.rm = T)) 
+```
+
+
+### Outcome 2: mg/kg by admin route
+```{r}
+topicals_mg_kg <- synergy_abs_mgkg_tidy_full_years %>%
+    filter(admin_route_group == 'topical') %>%
+    group_by(premises_year, year, premises_id) %>%
+    summarise(topical_mgkg = sum(abs_mg_kg, na.rm = T)) 
+
+im_mg_kg <- synergy_abs_mgkg_tidy_full_years %>%
+    filter(admin_route_group == 'IM') %>%
+    group_by(premises_year, year, premises_id) %>%
+    summarise(im_mgkg = sum(abs_mg_kg, na.rm = T)) 
+
+systemic_mg_kg <- synergy_abs_mgkg_tidy_full_years %>%
+    filter(admin_route_group == 'systemic') %>%
+    group_by(premises_year, year, premises_id) %>%
+    summarise(systemic_mgkg = sum(abs_mg_kg, na.rm = T)) 
+
+mg_kg_outcomes <- total_mgkg_with_topicals %>%
+  left_join(total_mgkg_esvac, by = c('premises_id', 'year', 'premises_year')) %>%
+  left_join(topicals_mg_kg, by = c('premises_id', 'year', 'premises_year')) %>%
+  left_join(im_mg_kg, by = c('premises_id', 'year', 'premises_year')) %>%
+  left_join(systemic_mg_kg, by = c('premises_id', 'year', 'premises_year')) %>%
+  ungroup()
+
+# where NA occurs, actually 0
+mg_kg_outcomes <- mg_kg_outcomes %>%
+  mutate(topical_mgkg = ifelse(is.na(topical_mgkg), 0, topical_mgkg),
+  im_mgkg = ifelse(is.na(im_mgkg), 0, im_mgkg),
+  systemic_mgkg = ifelse(is.na(systemic_mgkg), 0, systemic_mgkg))
+
+mg_kg_outcomes
+
+saveRDS(mg_kg_outcomes, paste0(path, 'mg_kg_outcomes.Rds'))
+```
+
+
+## Outcome 3 and 4: mg/kg by 
+### First, get yeild
+id_lookup <- read.csv(file = paste0(synergy_ds_path, "Synergy Interherd Farms to Lookup PatientIds.csv"), stringsAsFactors = F)
+
+- Get which animlal is on which premises
+```{r}
+interherd_path <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/synergy/data/from_interherd_db/new_pull/'
+
+animals_EAST <- read.csv(paste0(interherd_path, 'animals_EAST.csv'), stringsAsFactors = F)
+animals_SOUTH <- read.csv(paste0(interherd_path, 'animals_SOUTH.csv'), stringsAsFactors = F)
+animals_NORTH <- read.csv(paste0(interherd_path, 'animals_NORTH.csv'), stringsAsFactors = F)
+
+stays_EAST <- read.csv(paste0(interherd_path, 'stays_EAST.csv'), stringsAsFactors = F)
+stays_SOUTH <- read.csv(paste0(interherd_path, 'stays_SOUTH.csv'), stringsAsFactors = F)
+stays_NORTH <- read.csv(paste0(interherd_path, 'stays_NORTH.csv'), stringsAsFactors = F)
+
+
+
+animal_ids_EAST <- stays_EAST %>%
+  select(Animal, Premises) %>%
+  distinct() %>%
+  mutate(ID = Animal) %>%
+  left_join(animals_EAST, by = 'ID') %>%
+  filter(!(is.na(MilkRecID))) %>%
+  mutate(region = 'Synergy_EAST')
+
+animal_ids_SOUTH <- stays_SOUTH %>%
+  select(Animal, Premises) %>%
+  distinct() %>%
+  mutate(ID = Animal) %>%
+  left_join(animals_SOUTH, by = 'ID') %>%
+  filter(!(is.na(MilkRecID))) %>%
+  mutate(region = 'Synergy_SOUTH')
+
+animal_ids_NORTH <- stays_NORTH %>%
+  select(Animal, Premises) %>%
+  distinct() %>%
+  mutate(ID = Animal) %>%
+  left_join(animals_NORTH, by = 'ID') %>%
+  filter(!(is.na(MilkRecID))) %>%
+  mutate(region = 'Synergy_NORTH')
+
+all_interherd_info <- rbind(animal_ids_EAST, animal_ids_SOUTH, animal_ids_NORTH) %>%
+  mutate(animal_id = tolower(paste0( paste0(Animal, '_',region))),
+         interherd_premises_id = tolower(paste0( paste0(Premises, '_',region))),
+         milkrec_id = tolower(paste0( paste0(MilkRecID, '_',region)))) %>%
+  select(-Breed, -Sex, -Sire, -Fate, -IDOfficial, -GUID)
+
+id_lookup <- read.csv(file = paste0(synergy_ds_path, "Synergy Interherd Farms to Lookup PatientIds.csv"), stringsAsFactors = F)
+names(id_lookup) <- c('region', 'interherd_premises_id', 'premises_id' )
+id_lookup <- id_lookup %>%
+  mutate(interherd_premises_id = tolower(paste0(interherd_premises_id, '_', region)))
+
+all_interherd_info <- all_interherd_info %>%
+  left_join(id_lookup, by = 'interherd_premises_id')
+all_interherd_info
+saveRDS(all_interherd_info, paste0(path, 'all_interherd_info.Rds'))
+```
+
+
+- Get yeild info from parities tables
+```{r}
+parities_path <- '/Users/lv13916/Library/CloudStorage/OneDrive-UniversityofBristol/Documents/PhD/projects/synergy/data/from_interherd_db/new_pull/'
+region_name <- 'test'
+get_total_production_L <- function(df, region_name){
+  
+  parities_EAST_year_reports <- df %>%
+    mutate(lac_date = as.Date(Date, "%Y-%m-%d"),
+           lac_month = floor_date(lac_date, 'months'),
+           lac_year = floor_date(lac_date, 'years'),
+           ProdTotal = as.numeric(ProdTotal)) %>%
+    mutate(year_report_1 = ifelse(month(lac_date) < 2, year(lac_year), year(lac_year)),
+           year_report_2 = ifelse(month(lac_date) >= 2,
+                             year(lac_year) + 1,
+                             NA),
+           prod_year_1 = ifelse(is.na(year_report_2), ProdTotal,
+                                (ProdTotal) * ((lac_date - lac_year)/305)),
+           prod_year_2 = ProdTotal - prod_year_1) %>%
+    select(premises_id, animal_id, interherd_premises_id, year_report_1, year_report_2, prod_year_1, prod_year_2)
+    
+  parities_EAST_year_reports_year1 <- parities_EAST_year_reports %>%
+    select(premises_id, animal_id, interherd_premises_id, year_report_1, prod_year_1)
+  
+  parities_EAST_year_reports_year2 <- parities_EAST_year_reports %>%
+    select(premises_id, animal_id, interherd_premises_id, year_report_2, prod_year_2) %>%
+    rename('year_report_1' = 'year_report_2',
+           'prod_year_1' = 'prod_year_2')
+  
+  total_prod <- rbind(parities_EAST_year_reports_year1, parities_EAST_year_reports_year2) %>%
+    group_by(premises_id, animal_id, interherd_premises_id, year_report_1) %>%
+    summarise(yearly_prod_L = sum(prod_year_1, na.rm = T)) %>%
+    mutate(region = region_name) %>%
+    rename('year' = 'year_report_1')
+  
+  return(total_prod)
+}
+
+all_interherd_info <- readRDS(paste0(path, 'all_interherd_info.Rds'))
+
+parities_EAST <- read.csv(paste0(parities_path, 'parities_EAST.csv'), stringsAsFactors = F)%>%
+  rename(parity = 'Number') %>%
+  mutate(animal_id = paste0(Animal, '_', 'synergy_east')) %>%
+  left_join(all_interherd_info, by = 'animal_id')
+parities_SOUTH <- read.csv(paste0(parities_path, 'parities_SOUTH.csv'), stringsAsFactors = F)%>%
+  rename(parity = 'Number') %>%
+  mutate(animal_id = paste0(Animal, '_', 'synergy_south'))%>%
+  left_join(all_interherd_info, by = 'animal_id')
+parities_NORTH <- read.csv(paste0(parities_path, 'parities_NORTH.csv'), stringsAsFactors = F)%>%
+  rename(parity = 'Number') %>%
+  mutate(animal_id = paste0(Animal, '_', 'synergy_north'))%>%
+  left_join(all_interherd_info, by = 'animal_id')
+
+all_prod <- rbind(get_total_production_L(parities_EAST, 'Synergy_East'),
+      get_total_production_L(parities_SOUTH, 'Synergy_South'),
+      get_total_production_L(parities_NORTH, 'Synergy_North')) %>%
+  ungroup()
+
+
+synergy_abs_mgkg <- readRDS(paste0(path, 'amu/synergy_abs_mgkg.Rds'))
+
+herd_size_info <- synergy_abs_mgkg %>%
+  select(region, interherd_ID, premises_id, date, rolling_12_month_av) %>%
+  mutate(year = year(date)) %>%
+  select(-date) %>%
+  group_by(year, region, interherd_ID, premises_id) %>%
+  summarise(herd_size = mean(rolling_12_month_av, na.rm = T)) %>%
+  distinct() %>%
+  droplevels() %>%
+  ungroup() %>%
+  mutate(interherd_premises_id = paste0(interherd_ID, '_', tolower(region)),
+         prem) %>%
+  select(-interherd_ID)
+
+saveRDS(herd_size_info, paste0(path, 'herd_size_info.Rds'))
+ 
+all_prod_joined <- all_prod %>%
+  mutate(premises_id = as.character(premises_id)) %>%
+  left_join(herd_size_info, by = c('interherd_premises_id', 'region', 'year', 'premises_id')) %>%
+  filter(!is.na(premises_id)) %>%
+  mutate(total_prod_per_cow = yearly_prod_L/herd_size,
+         year_num = year) %>%
+  select(premises_id, interherd_premises_id, region, year_num, total_prod_per_cow) %>%
+  group_by(premises_id, interherd_premises_id, region, year_num) %>%
+  summarise(total_prod_per_cow = sum(total_prod_per_cow, na.rm = T)) %>%
+  distinct()
+  
+all_prod_joined
+
+saveRDS(all_prod_joined, paste0(path, 'yeild_info_per_year_cow.Rds'))
+``` 
+
+- Add to outcome data
+```{r}
+all_prod_joined <- readRDS(paste0(path, 'yeild_info_per_year_cow.Rds'))
+
+mg_kg_outcomes <- readRDS(paste0(path, 'mg_kg_outcomes.Rds'))
+
+
+
+mg_kg_outcomes_known <- mg_kg_outcomes %>%
+  mutate(year_num = year(year)) %>%
+  left_join(all_prod_joined, by = c('year_num', 'premises_id')) 
+
+# using mean value for unknowns
+mu_value <- mean((mg_kg_outcomes_known %>%
+  filter(total_prod_per_cow != 0))$total_prod_per_cow,
+  na.rm = T)
+
+mg_kg_outcomes_all <- mg_kg_outcomes_known %>%
+  mutate(total_prod_per_cow = ifelse(total_prod_per_cow == 0, mu_value, total_prod_per_cow),
+         total_mgkg_per_L_esvac = total_mgkg_esvac/total_prod_per_cow,
+         total_mgkg_per_L = total_mgkg/total_prod_per_cow)
+
+mg_kg_outcomes_all_tidy <- mg_kg_outcomes_all %>%
+  select(premises_year, premises_id, interherd_premises_id, region, year, year_num, everything())
+
+mg_kg_outcomes_all_tidy
+
+```
+### Outcome 4: Change in AMU - using mg/kg/L
+```{r}
+mg_kg_outcomes_all_tidy %>%
+  filter(year_num %in% c(2010, 2018)) %>%
+  select(premises_id, year_num, total_mgkg_per_L_esvac) %>%
+  spread(key = 'year_num', value = 'total_mgkg_per_L_esvac') %>%
+  mutate(change_total_mgkg_per_L_esvac = `2018`-`2010`) %>%
+  filter(!is.na(change_total_mgkg_per_L_esvac))
+
+
+```
+
+### Final outcome predictors
+```{r}
+mg_kg_outcomes_all_tidy %>%
+  ggplot() +
+  geom_line(aes(y = total_mgkg_esvac, x = year, group = premises_id)) +
+  scale_y_continuous(trans = 'log10')
+
+quantile(mg_kg_outcomes_all_tidy$total_mgkg, 0.975)
+quantile(mg_kg_outcomes_all_tidy$total_mgkg, 0.975)
+
+quantile(mg_kg_outcomes_all_tidy$total_mgkg, 0.975)
+
+mg_kg_outcomes_all_tidy %>%
+  ggplot() +
+  geom_violin(aes(y = total_mgkg_esvac, x = 1)) +
+  geom_hline(aes(yintercept = quantile(total_mgkg, 0.975))) +
+  geom_hline(aes(yintercept = quantile(total_mgkg, 0.025))) +
+  geom_hline(aes(yintercept = quantile(total_mgkg, 0.75))) +
+  geom_hline(aes(yintercept = quantile(total_mgkg, 0.25)))+
+  scale_y_continuous(trans = 'log10')
+
+mg_kg_outcomes_all_tidy_no_outlier <- mg_kg_outcomes_all_tidy %>%
+  filter(!(total_mgkg > quantile(total_mgkg, 0.975))) # removing top 2.5% - very high, error in recording?
+
+saveRDS(mg_kg_outcomes_all_tidy_no_outlier, paste0(path, 'mg_kg_outcomes_all_tidy_no_outlier.Rds'))
+
+```
+
+
+### Scaling outcome predictors
+```{r}
+mg_kg_outcomes_all_tidy_no_outlier <- readRDS(paste0(path, 'mg_kg_outcomes_all_tidy_no_outlier.Rds'))
+
+# getting scaling variables to save separately
+mean_vals <- mg_kg_outcomes_all_tidy_no_outlier %>%
+                 select(total_mgkg, total_mgkg_esvac, topical_mgkg, im_mgkg, systemic_mgkg, total_mgkg_per_L_esvac, total_mgkg_per_L) %>%
+  summarise_all(~mean(., na.rm = T)) %>%
+  gather(key = 'outcome_variable', value = 'mean')
+
+sd_vals <- mg_kg_outcomes_all_tidy_no_outlier %>%
+                 select(total_mgkg, total_mgkg_esvac, topical_mgkg, im_mgkg, systemic_mgkg, total_mgkg_per_L_esvac, total_mgkg_per_L) %>%
+  summarise_all(~sd(., na.rm = T)) %>%
+  gather(key = 'outcome_variable', value = 'sd')
+
+scaling_stats_for_outcome <- mean_vals %>%
+  full_join(sd_vals, by = 'outcome_variable')
+
+saveRDS(scaling_stats_for_outcome, paste0(path, 'scaling_stats_for_outcome.Rds'))
+
+# transformations - all log apart from the 3 admin route grouped which are log plus 1
+ mg_kg_outcomes_all_tidy_T <- mg_kg_outcomes_all_tidy_no_outlier %>%
+                 select(premises_year, total_mgkg, total_mgkg_esvac, topical_mgkg, im_mgkg, systemic_mgkg, total_mgkg_per_L_esvac, total_mgkg_per_L) %>%
+  mutate(total_mgkg_T = log(total_mgkg),
+         total_mgkg_esvac_T = log(total_mgkg_esvac),
+         topical_mgkg_T = log1p(topical_mgkg),
+         im_mgkg_T = log1p(im_mgkg),
+         systemic_mgkg_T = log1p(systemic_mgkg),
+         total_mgkg_per_L_esvac_mgkg_T = log(total_mgkg_per_L_esvac),
+         total_mgkg_per_L_T = log(total_mgkg_per_L))
+
+ mean_vals <- mg_kg_outcomes_all_tidy_T %>%
+                 select(total_mgkg, total_mgkg_esvac, topical_mgkg, im_mgkg, systemic_mgkg, total_mgkg_per_L_esvac, total_mgkg_per_L) %>%
+  summarise_all(~mean(., na.rm = T)) %>%
+  gather(key = 'outcome_variable', value = 'mean')
+
+sd_vals <- mg_kg_outcomes_all_tidy_T %>%
+                 select(total_mgkg, total_mgkg_esvac, topical_mgkg, im_mgkg, systemic_mgkg, total_mgkg_per_L_esvac, total_mgkg_per_L) %>%
+  summarise_all(~sd(., na.rm = T)) %>%
+  gather(key = 'outcome_variable', value = 'sd')
+
+scaling_stats_for_outcome_T <- mean_vals %>%
+  full_join(sd_vals, by = 'outcome_variable')
+
+saveRDS(scaling_stats_for_outcome, paste0(path, 'scaling_stats_for_outcome_T.Rds'))
+
+# scaling
+mg_kg_outcomes_all_tidy_T_S <- mg_kg_outcomes_all_tidy_T %>%
+                 select(premises_year, total_mgkg_T, total_mgkg_esvac_T, topical_mgkg_T, im_mgkg_T, systemic_mgkg_T, total_mgkg_per_L_esvac_mgkg_T, total_mgkg_per_L_T) %>%
+  mutate(total_mgkg_T_S = scale(total_mgkg_T),
+         total_mgkg_esvac_T_S = scale(total_mgkg_esvac_T),
+         topical_mgkg_T_S = scale(topical_mgkg_T),
+         im_mgkg_T_S = scale(im_mgkg_T),
+         systemic_mgkg_T_S = scale(systemic_mgkg_T),
+         total_mgkg_per_L_esvac_T_S = scale(total_mgkg_per_L_esvac_mgkg_T),
+         total_mgkg_per_L_T_S = scale(total_mgkg_per_L_T))
+
+mg_kg_outcomes_all_tidy_T_S
+
+saveRDS(mg_kg_outcomes_all_tidy_T_S, paste0(path, 'mg_kg_outcomes_all_tidy_T_S.Rds'))
+```
+### Descriptive stats of outcome
+```{r}
+mg_kg_outcomes_all_tidy_no_outlier <- readRDS(paste0(path, 'mg_kg_outcomes_all_tidy_no_outlier.Rds'))
+
+mg_kg_outcomes_all_tidy_T_S <- readRDS(paste0(path, 'mg_kg_outcomes_all_tidy_T_S.Rds'))
+
+# boxplot of use over years
+mg_kg_outcomes_all_tidy_no_outlier %>%
+  ggplot() +
+  geom_boxplot(aes(y = total_mgkg_esvac, x = year, group = year)) +
+  scale_y_continuous(trans = 'log10') +
+  geom_smooth(aes(y = total_mgkg_esvac, x = year))
+
+mg_kg_outcomes_all_tidy_no_outlier %>%
+  ggplot() +
+  geom_boxplot(aes(y = topical_mgkg, x = year, group = year)) +
+  scale_y_continuous(trans = 'log1p') +
+  geom_smooth(aes(y = topical_mgkg, x = year))
+
+mg_kg_outcomes_all_tidy_no_outlier %>%
+  ggplot() +
+  geom_boxplot(aes(y = im_mgkg, x = year, group = year)) +
+  scale_y_continuous(trans = 'log1p') +
+  geom_smooth(aes(y = im_mgkg, x = year))
+
+mg_kg_outcomes_all_tidy_no_outlier %>%
+  ggplot() +
+  geom_boxplot(aes(y = systemic_mgkg, x = year, group = year)) +
+  scale_y_continuous(trans = 'log1p') +
+  geom_smooth(aes(y = systemic_mgkg, x = year))
+
+mg_kg_outcomes_all_tidy_no_outlier %>%
+  ggplot() +
+  geom_boxplot(aes(y = total_mgkg_per_L_esvac, x = year, group = year)) +
+  scale_y_continuous(trans = 'log10') +
+  geom_smooth(aes(y = total_mgkg_per_L_esvac, x = year))
+
+
+
+# histograms of use - original and transformed and scaled
+mg_kg_outcomes_all_tidy_no_outlier %>%
+  ggplot() +
+  geom_histogram(aes(x = total_mgkg_esvac))
+
+mg_kg_outcomes_all_tidy_T_S %>%
+  ggplot() +
+  geom_histogram(aes(x = total_mgkg_esvac_T_S))
+
+# by group
+mg_kg_outcomes_all_tidy_no_outlier %>%
+  ggplot() +
+  geom_histogram(aes(x = topical_mgkg))
+
+mg_kg_outcomes_all_tidy_T_S %>%
+  ggplot() +
+  geom_histogram(aes(x = topical_mgkg_T_S))
+
+mg_kg_outcomes_all_tidy_no_outlier %>%
+  ggplot() +
+  geom_histogram(aes(x = im_mgkg))
+
+mg_kg_outcomes_all_tidy_T_S %>%
+  ggplot() +
+  geom_histogram(aes(x = im_mgkg_T_S))
+
+mg_kg_outcomes_all_tidy_no_outlier %>%
+  ggplot() +
+  geom_histogram(aes(x = systemic_mgkg))
+
+mg_kg_outcomes_all_tidy_T_S %>%
+  ggplot() +
+  geom_histogram(aes(x = systemic_mgkg_T_S))
+
+# amu per L
+mg_kg_outcomes_all_tidy_no_outlier %>%
+  ggplot() +
+  geom_histogram(aes(x = total_mgkg_per_L_esvac))
+
+mg_kg_outcomes_all_tidy_T_S %>%
+  ggplot() +
+  geom_histogram(aes(x = total_mgkg_per_L_esvac_T_S))
+
+```
+
+```{r}
+
+```
+
